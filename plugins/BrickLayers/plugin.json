@@ -1,0 +1,8 @@
+{
+    "name": "Brick Layers",
+    "author": "Community",
+    "version": "1.0.0",
+    "description": "Shifts alternating perimeter wall loops up by half a layer height, creating interlocking brick-like walls for dramatically stronger prints.",
+    "api": 8,
+    "i18n-catalog": "cura"
+}
