@@ -38,11 +38,12 @@ class BrickLayersSettingsAppender(AdditionalSettingDefinitionsAppender):
 
     def __init__(self) -> None:
         super().__init__(i18nCatalog("fdmprinter.def.json"))
-        plugin_path = PluginRegistry.getInstance().getPluginPath("BrickLayers")
-        if plugin_path:
-            self.definition_file_paths = [
-                Path(os.path.join(plugin_path, "brick_layers_settings.def.json"))
-            ]
+        # Use __file__ to locate the settings JSON — PluginRegistry.getPluginPath()
+        # isn't available yet during register() since the plugin isn't fully loaded.
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        self.definition_file_paths = [
+            Path(os.path.join(plugin_dir, "brick_layers_settings.def.json"))
+        ]
 
 
 class PerimeterLoop:
