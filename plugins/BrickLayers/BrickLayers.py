@@ -5,12 +5,16 @@
 # Shifts alternating perimeter wall loops up by half a layer height,
 # creating interlocking brick-like walls for dramatically stronger prints.
 
+import os
 import re
 from typing import List, Optional, Tuple
+
+from PyQt6.QtCore import QObject, pyqtProperty, pyqtSignal, pyqtSlot
 
 from UM.Application import Application
 from UM.Extension import Extension
 from UM.Logger import Logger
+from UM.PluginRegistry import PluginRegistry
 from UM.i18n import i18nCatalog
 
 from cura.CuraApplication import CuraApplication
@@ -62,15 +66,20 @@ class PerimeterLoop:
             self.prefix_lines.append(line)
 
 
-class BrickLayers(Extension):
+class BrickLayers(QObject, Extension):
 
-    def __init__(self) -> None:
-        super().__init__()
+    settingsChanged = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        QObject.__init__(self, parent)
+        Extension.__init__(self)
 
         self.setMenuName(i18n_catalog.i18nc("@item:inmenu", "Brick Layers"))
         self.addMenuItem(
-            i18n_catalog.i18nc("@item:inmenu", "Toggle Brick Layers"),
-            self._toggleEnabled)
+            i18n_catalog.i18nc("@item:inmenu", "Settings"),
+            self.showDialog)
+
+        self._dialog = None
 
         self._preferences = Application.getInstance().getPreferences()
         self._preferences.addPreference("bricklayers/enabled", False)
@@ -83,12 +92,96 @@ class BrickLayers(Extension):
 
         Application.getInstance().getOutputDeviceManager().writeStarted.connect(
             self._onWriteStarted)
+        CuraApplication.getInstance().mainWindowChanged.connect(self._createDialog)
 
-    def _toggleEnabled(self) -> None:
-        current = self._preferences.getValue("bricklayers/enabled")
-        self._preferences.setValue("bricklayers/enabled", not current)
-        state = "enabled" if not current else "disabled"
-        Logger.log("i", "BrickLayers: %s", state)
+    # ------------------------------------------------------------------ #
+    # Dialog management
+    # ------------------------------------------------------------------ #
+
+    def _createDialog(self) -> None:
+        plugin_path = PluginRegistry.getInstance().getPluginPath("BrickLayers")
+        if plugin_path is None:
+            return
+        path = os.path.join(plugin_path, "BrickLayersDialog.qml")
+        self._dialog = CuraApplication.getInstance().createQmlComponent(
+            path, {"manager": self})
+
+    def showDialog(self) -> None:
+        if self._dialog is None:
+            self._createDialog()
+        if self._dialog:
+            self._dialog.show()
+
+    # ------------------------------------------------------------------ #
+    # QML property getters
+    # ------------------------------------------------------------------ #
+
+    @pyqtProperty(bool, notify=settingsChanged)
+    def enabled(self) -> bool:
+        return bool(self._preferences.getValue("bricklayers/enabled"))
+
+    @pyqtProperty(float, notify=settingsChanged)
+    def layerHeight(self) -> float:
+        return float(self._preferences.getValue("bricklayers/layer_height"))
+
+    @pyqtProperty(float, notify=settingsChanged)
+    def extrusionMultiplier(self) -> float:
+        return float(self._preferences.getValue("bricklayers/extrusion_multiplier"))
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def startLayer(self) -> int:
+        return int(self._preferences.getValue("bricklayers/start_layer"))
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def endLayer(self) -> int:
+        return int(self._preferences.getValue("bricklayers/end_layer"))
+
+    @pyqtProperty(bool, notify=settingsChanged)
+    def applyToInnerWalls(self) -> bool:
+        return bool(self._preferences.getValue("bricklayers/apply_to_inner_walls"))
+
+    @pyqtProperty(bool, notify=settingsChanged)
+    def applyToOuterWalls(self) -> bool:
+        return bool(self._preferences.getValue("bricklayers/apply_to_outer_walls"))
+
+    # ------------------------------------------------------------------ #
+    # QML property setters (slots)
+    # ------------------------------------------------------------------ #
+
+    @pyqtSlot(bool)
+    def setEnabled(self, value: bool) -> None:
+        self._preferences.setValue("bricklayers/enabled", value)
+        self.settingsChanged.emit()
+
+    @pyqtSlot(float)
+    def setLayerHeight(self, value: float) -> None:
+        self._preferences.setValue("bricklayers/layer_height", value)
+        self.settingsChanged.emit()
+
+    @pyqtSlot(float)
+    def setExtrusionMultiplier(self, value: float) -> None:
+        self._preferences.setValue("bricklayers/extrusion_multiplier", value)
+        self.settingsChanged.emit()
+
+    @pyqtSlot(int)
+    def setStartLayer(self, value: int) -> None:
+        self._preferences.setValue("bricklayers/start_layer", value)
+        self.settingsChanged.emit()
+
+    @pyqtSlot(int)
+    def setEndLayer(self, value: int) -> None:
+        self._preferences.setValue("bricklayers/end_layer", value)
+        self.settingsChanged.emit()
+
+    @pyqtSlot(bool)
+    def setApplyToInnerWalls(self, value: bool) -> None:
+        self._preferences.setValue("bricklayers/apply_to_inner_walls", value)
+        self.settingsChanged.emit()
+
+    @pyqtSlot(bool)
+    def setApplyToOuterWalls(self, value: bool) -> None:
+        self._preferences.setValue("bricklayers/apply_to_outer_walls", value)
+        self.settingsChanged.emit()
 
     def _onWriteStarted(self, output_device) -> None:
         """Hook into GCode write pipeline — modify GCode before saving."""
