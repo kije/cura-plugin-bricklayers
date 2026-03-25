@@ -1,0 +1,80 @@
+{
+    "experimental":
+    {
+        "label": "Experimental",
+        "type": "category",
+        "children":
+        {
+            "brick_layers_enabled":
+            {
+                "label": "Brick Layers",
+                "description": "Shift alternating inner wall perimeter loops up by half a layer height, creating interlocking brick-like walls. This dramatically improves vertical part strength by preventing aligned layer seams.",
+                "type": "bool",
+                "default_value": false,
+                "settable_per_mesh": true,
+                "settable_per_extruder": true,
+                "children":
+                {
+                    "brick_layers_extrusion_multiplier":
+                    {
+                        "label": "Brick Layers Extrusion Multiplier",
+                        "description": "Multiplier for extrusion on shifted wall loops. Compensates for the increased gap between the shifted loop and the layer below. Values around 1.05 work well.",
+                        "type": "float",
+                        "default_value": 1.05,
+                        "minimum_value": "0.5",
+                        "maximum_value": "2.0",
+                        "minimum_value_warning": "0.8",
+                        "maximum_value_warning": "1.5",
+                        "enabled": "brick_layers_enabled",
+                        "settable_per_mesh": true,
+                        "settable_per_extruder": true
+                    },
+                    "brick_layers_start_layer":
+                    {
+                        "label": "Brick Layers Start Layer",
+                        "description": "First layer to apply brick pattern (layer number starting at 1). Layers before this are printed normally. Recommended to skip at least 2-3 layers for bed adhesion.",
+                        "type": "int",
+                        "default_value": 3,
+                        "minimum_value": "1",
+                        "enabled": "brick_layers_enabled",
+                        "settable_per_mesh": false,
+                        "settable_per_extruder": false,
+                        "settable_per_meshgroup": false
+                    },
+                    "brick_layers_end_layer":
+                    {
+                        "label": "Brick Layers End Layer",
+                        "description": "Last layer to apply brick pattern. Use -1 to apply to all layers.",
+                        "type": "int",
+                        "default_value": -1,
+                        "minimum_value": "-1",
+                        "enabled": "brick_layers_enabled",
+                        "settable_per_mesh": false,
+                        "settable_per_extruder": false,
+                        "settable_per_meshgroup": false
+                    },
+                    "brick_layers_apply_inner_walls":
+                    {
+                        "label": "Brick Layers Inner Walls",
+                        "description": "Shift alternating inner wall perimeter loops. This is the primary use case for brick layers.",
+                        "type": "bool",
+                        "default_value": true,
+                        "enabled": "brick_layers_enabled",
+                        "settable_per_mesh": true,
+                        "settable_per_extruder": true
+                    },
+                    "brick_layers_apply_outer_walls":
+                    {
+                        "label": "Brick Layers Outer Walls",
+                        "description": "Shift alternating outer wall perimeter loops. Warning: this affects dimensional accuracy and surface finish. Only enable if you need maximum strength.",
+                        "type": "bool",
+                        "default_value": false,
+                        "enabled": "brick_layers_enabled",
+                        "settable_per_mesh": true,
+                        "settable_per_extruder": true
+                    }
+                }
+            }
+        }
+    }
+}

@@ -5,21 +5,44 @@
 # Shifts alternating perimeter wall loops up by half a layer height,
 # creating interlocking brick-like walls for dramatically stronger prints.
 #
-# Settings are defined in fdmprinter.def.json under the "experimental"
-# category and appear in Cura's sidebar like any other print setting.
+# Settings are registered via AdditionalSettingDefinitionsAppender so they
+# appear in Cura's sidebar under Experimental, without modifying
+# fdmprinter.def.json.
 
+import os
 import re
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from UM.Application import Application
 from UM.Extension import Extension
 from UM.Logger import Logger
 from UM.PluginRegistry import PluginRegistry
+from UM.Settings.AdditionalSettingDefinitionsAppender import AdditionalSettingDefinitionsAppender
+from UM.Settings.ContainerRegistry import ContainerRegistry
+from UM.i18n import i18nCatalog
 
 from cura.CuraApplication import CuraApplication
 
 # Sentinel comment to prevent double-processing
 _BRICK_LAYERS_MARKER = ";BRICKLAYERS_PROCESSED"
+
+# Mangled setting name prefix — matches AdditionalSettingDefinitionsAppender's
+# name mangling: _<type>__<id>__<version>__<key>
+# Plugin id: "BrickLayers", version from plugin.json: "1.0.0" -> "1_0_0"
+_S = "_plugin__bricklayers__1_0_0__"
+
+
+class BrickLayersSettingsAppender(AdditionalSettingDefinitionsAppender):
+    """Registers BrickLayers settings into Cura's setting definitions."""
+
+    def __init__(self) -> None:
+        super().__init__(i18nCatalog("fdmprinter.def.json"))
+        plugin_path = PluginRegistry.getInstance().getPluginPath("BrickLayers")
+        if plugin_path:
+            self.definition_file_paths = [
+                Path(os.path.join(plugin_path, "brick_layers_settings.def.json"))
+            ]
 
 
 class PerimeterLoop:
@@ -67,20 +90,32 @@ class BrickLayers(Extension):
 
     def __init__(self) -> None:
         super().__init__()
+
+        # Register settings appender so our settings appear in the sidebar
+        self._settings_appender = BrickLayersSettingsAppender()
+        self._settings_appender.setPluginId("BrickLayers")
+        self._settings_appender.setVersion("1.0.0")
+        ContainerRegistry.getInstance().addAdditionalSettingDefinitionsAppender(
+            self._settings_appender)
+
         Application.getInstance().getOutputDeviceManager().writeStarted.connect(
             self._onWriteStarted)
 
     # ------------------------------------------------------------------ #
-    # Settings (read from global container stack — defined in fdmprinter.def.json)
+    # Settings (read from global container stack with mangled names)
     # ------------------------------------------------------------------ #
 
     @staticmethod
     def _getSetting(key: str):
-        """Read a setting from the global container stack."""
+        """Read a plugin setting from the global container stack.
+
+        Setting names are mangled by AdditionalSettingDefinitionsAppender to
+        prevent collisions: brick_layers_enabled -> _plugin__bricklayers__1_0_0__brick_layers_enabled
+        """
         global_stack = CuraApplication.getInstance().getGlobalContainerStack()
         if global_stack is None:
             return None
-        return global_stack.getProperty(key, "value")
+        return global_stack.getProperty(_S + key, "value")
 
     # ------------------------------------------------------------------ #
     # GCode pipeline hook
@@ -172,13 +207,18 @@ class BrickLayers(Extension):
         if global_stack is None:
             return data
 
-        # Read settings from the print profile
+        # Read settings from the print profile (mangled names)
         layer_height = float(global_stack.getProperty("layer_height", "value"))
-        extrusion_multiplier = float(global_stack.getProperty("brick_layers_extrusion_multiplier", "value"))
-        start_layer = int(global_stack.getProperty("brick_layers_start_layer", "value"))
-        end_layer = int(global_stack.getProperty("brick_layers_end_layer", "value"))
-        apply_inner = bool(global_stack.getProperty("brick_layers_apply_inner_walls", "value"))
-        apply_outer = bool(global_stack.getProperty("brick_layers_apply_outer_walls", "value"))
+        extrusion_multiplier = float(global_stack.getProperty(
+            _S + "brick_layers_extrusion_multiplier", "value"))
+        start_layer = int(global_stack.getProperty(
+            _S + "brick_layers_start_layer", "value"))
+        end_layer = int(global_stack.getProperty(
+            _S + "brick_layers_end_layer", "value"))
+        apply_inner = bool(global_stack.getProperty(
+            _S + "brick_layers_apply_inner_walls", "value"))
+        apply_outer = bool(global_stack.getProperty(
+            _S + "brick_layers_apply_outer_walls", "value"))
 
         z_shift = layer_height / 2.0
 
