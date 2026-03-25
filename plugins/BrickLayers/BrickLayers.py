@@ -209,6 +209,70 @@ class BrickLayers(QObject, Extension):
         gcode_dict[active_build_plate_id] = gcode_list
         setattr(scene, "gcode_dict", gcode_dict)
 
+        # Refresh the preview layer data so the Z-shifts are visible
+        self._refreshPreviewLayerData(scene, gcode_list)
+
+    def _refreshPreviewLayerData(self, scene, gcode_list: List[str]) -> None:
+        """Re-parse modified GCode into layer data and update the preview.
+
+        Uses the GCodeReader plugin's FlavorParser to parse the modified
+        GCode back into LayerData, then replaces the existing preview data
+        on the scene node so the Z-shifted loops are visible in the layer view.
+        """
+        try:
+            from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
+            from cura.LayerDataDecorator import LayerDataDecorator
+
+            # Find the scene node that holds the current layer data
+            target_node = None
+            for node in DepthFirstIterator(scene.getRoot()):
+                if node.callDecoration("getLayerData"):
+                    target_node = node
+                    break
+
+            if target_node is None:
+                return
+
+            # Get the GCodeReader plugin to re-parse our modified GCode
+            gcode_reader = PluginRegistry.getInstance().getPluginObject("GCodeReader")
+            if gcode_reader is None:
+                Logger.log("w", "BrickLayers: GCodeReader plugin not available for preview refresh")
+                return
+
+            gcode_stream = "\n".join(gcode_list)
+            gcode_reader.preReadFromStream(gcode_stream)
+            result_node = gcode_reader.readFromStream(gcode_stream, "bricklayers_preview")
+
+            if result_node is None:
+                return
+
+            # Extract the new layer data from the parsed result
+            new_layer_data = result_node.callDecoration("getLayerData")
+            if new_layer_data is None:
+                return
+
+            # Replace the layer data on the existing scene node
+            old_decorator = target_node.getDecorator(LayerDataDecorator)
+            if old_decorator:
+                old_decorator.setLayerData(new_layer_data)
+            else:
+                decorator = LayerDataDecorator()
+                decorator.setLayerData(new_layer_data)
+                target_node.addDecorator(decorator)
+
+            # Reset the SimulationView cache so it picks up the new data
+            view = Application.getInstance().getController().getActiveView()
+            if hasattr(view, "resetLayerData"):
+                view.resetLayerData()
+
+            # Notify the scene that data changed so the preview refreshes
+            scene.sceneChanged.emit(target_node)
+
+            Logger.log("d", "BrickLayers: Preview layer data refreshed")
+
+        except Exception:
+            Logger.logException("w", "BrickLayers: Failed to refresh preview layer data")
+
     # ------------------------------------------------------------------ #
     # GCode transformation logic
     # ------------------------------------------------------------------ #
