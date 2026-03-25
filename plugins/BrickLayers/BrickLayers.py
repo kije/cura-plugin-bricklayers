@@ -5,45 +5,27 @@
 # Shifts alternating perimeter wall loops up by half a layer height,
 # creating interlocking brick-like walls for dramatically stronger prints.
 #
-# Settings are registered via AdditionalSettingDefinitionsAppender so they
-# appear in Cura's sidebar under Experimental, without modifying
-# fdmprinter.def.json.
+# Settings are injected into Cura's definition containers at runtime
+# (same pattern as ArcWelder plugin) so they appear in the sidebar.
 
+from collections import OrderedDict
+import json
 import os
 import re
-from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple
 
 from UM.Application import Application
 from UM.Extension import Extension
 from UM.Logger import Logger
 from UM.PluginRegistry import PluginRegistry
-from UM.Settings.AdditionalSettingDefinitionsAppender import AdditionalSettingDefinitionsAppender
+from UM.Settings.SettingDefinition import SettingDefinition
+from UM.Settings.DefinitionContainer import DefinitionContainer
 from UM.Settings.ContainerRegistry import ContainerRegistry
 from UM.i18n import i18nCatalog
 
 from cura.CuraApplication import CuraApplication
 
-# Sentinel comment to prevent double-processing
 _BRICK_LAYERS_MARKER = ";BRICKLAYERS_PROCESSED"
-
-# Mangled setting name prefix — matches AdditionalSettingDefinitionsAppender's
-# name mangling: _<type>__<id>__<version>__<key>
-# Plugin id: "BrickLayers", version from plugin.json: "1.0.0" -> "1_0_0"
-_S = "_plugin__bricklayers__1_0_0__"
-
-
-class BrickLayersSettingsAppender(AdditionalSettingDefinitionsAppender):
-    """Registers BrickLayers settings into Cura's setting definitions."""
-
-    def __init__(self) -> None:
-        super().__init__(i18nCatalog("fdmprinter.def.json"))
-        # Use __file__ to locate the settings JSON — PluginRegistry.getPluginPath()
-        # isn't available yet during register() since the plugin isn't fully loaded.
-        plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        self.definition_file_paths = [
-            Path(os.path.join(plugin_dir, "brick_layers_settings.def.json"))
-        ]
 
 
 class PerimeterLoop:
@@ -51,8 +33,6 @@ class PerimeterLoop:
 
     Lines are separated into prefix (retract/travel/unretract before extrusion)
     and body (extrusion moves and any mid-loop non-extrusion moves).
-    This separation allows clean reconstruction of transitions when loops
-    are reordered.
     """
 
     def __init__(self, loop_type: str) -> None:
@@ -92,39 +72,124 @@ class BrickLayers(Extension):
     def __init__(self) -> None:
         super().__init__()
 
-        # Register settings appender so our settings appear in the sidebar
-        self._settings_appender = BrickLayersSettingsAppender()
-        self._settings_appender.setPluginId("BrickLayers")
-        self._settings_appender.setVersion("1.0.0")
-        ContainerRegistry.getInstance().addAdditionalSettingDefinitionsAppender(
-            self._settings_appender)
+        self._application = Application.getInstance()
 
-        Application.getInstance().getOutputDeviceManager().writeStarted.connect(
-            self._onWriteStarted)
+        # Load settings definition from JSON
+        settings_definition_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "brick_layers_settings.def.json"
+        )
+        try:
+            with open(settings_definition_path, "r", encoding="utf-8") as f:
+                self._settings_dict = json.load(
+                    f, object_pairs_hook=OrderedDict
+                )["settings"]
+        except Exception:
+            Logger.logException("e", "Could not load brick layers settings definition")
+            return
+
+        self._application.getPreferences().addPreference(
+            "bricklayers/settings_made_visible", False
+        )
+
+        ContainerRegistry.getInstance().containerLoadComplete.connect(
+            self._onContainerLoadComplete
+        )
+        self._application.getOutputDeviceManager().writeStarted.connect(
+            self._onWriteStarted
+        )
 
     # ------------------------------------------------------------------ #
-    # Settings (read from global container stack with mangled names)
+    # Settings injection (same pattern as ArcWelder plugin)
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _getSetting(key: str):
-        """Read a plugin setting from the global container stack.
+    def _onContainerLoadComplete(self, container_id: str) -> None:
+        if not ContainerRegistry.getInstance().isLoaded(container_id):
+            return
 
-        Setting names are mangled by AdditionalSettingDefinitionsAppender to
-        prevent collisions: brick_layers_enabled -> _plugin__bricklayers__1_0_0__brick_layers_enabled
-        """
-        global_stack = CuraApplication.getInstance().getGlobalContainerStack()
-        if global_stack is None:
-            return None
-        return global_stack.getProperty(_S + key, "value")
+        try:
+            container = ContainerRegistry.getInstance().findContainers(
+                id=container_id
+            )[0]
+        except IndexError:
+            return
+
+        if not isinstance(container, DefinitionContainer):
+            return
+        if container.getMetaDataEntry("type") == "extruder":
+            return
+
+        # Add settings under the "experimental" category
+        try:
+            category = container.findDefinitions(key="experimental")[0]
+        except IndexError:
+            Logger.log("e", "BrickLayers: Could not find 'experimental' category")
+            return
+
+        for setting_key in self._settings_dict.keys():
+            setting_definition = SettingDefinition(
+                setting_key, container, category, None
+            )
+            setting_definition.deserialize(self._settings_dict[setting_key])
+
+            category._children.append(setting_definition)
+            container._definition_cache[setting_key] = setting_definition
+
+            self._expanded_categories = self._application.expandedCategories.copy()
+            self._updateAddedChildren(container, setting_definition)
+            self._application.setExpandedCategories(self._expanded_categories)
+            self._expanded_categories.clear()
+            container._updateRelations(setting_definition)
+
+        # Make settings visible in the sidebar (only once)
+        preferences = self._application.getPreferences()
+        if not preferences.getValue("bricklayers/settings_made_visible"):
+            setting_keys = self._getAllSettingKeys(self._settings_dict)
+
+            visible_settings = preferences.getValue("general/visible_settings")
+            visible_settings_changed = False
+            for key in setting_keys:
+                if key not in visible_settings:
+                    visible_settings += ";%s" % key
+                    visible_settings_changed = True
+
+            if visible_settings_changed:
+                preferences.setValue("general/visible_settings", visible_settings)
+
+            preferences.setValue("bricklayers/settings_made_visible", True)
+
+    def _updateAddedChildren(
+        self, container: DefinitionContainer, setting_definition: SettingDefinition
+    ) -> None:
+        children = setting_definition.children
+        if not children or not setting_definition.parent:
+            return
+
+        if setting_definition.parent.key in self._expanded_categories:
+            self._expanded_categories.append(setting_definition.key)
+
+        for child in children:
+            container._definition_cache[child.key] = child
+            self._updateAddedChildren(container, child)
+
+    def _getAllSettingKeys(self, definition: Dict[str, Any]) -> List[str]:
+        children = []
+        for key in definition:
+            children.append(key)
+            if "children" in definition[key]:
+                children.extend(self._getAllSettingKeys(definition[key]["children"]))
+        return children
 
     # ------------------------------------------------------------------ #
     # GCode pipeline hook
     # ------------------------------------------------------------------ #
 
     def _onWriteStarted(self, output_device) -> None:
-        """Hook into GCode write pipeline — modify GCode before saving."""
-        if not self._getSetting("brick_layers_enabled"):
+        global_stack = CuraApplication.getInstance().getGlobalContainerStack()
+        if not global_stack:
+            return
+
+        if not global_stack.getProperty("brick_layers_enabled", "value"):
             return
 
         scene = Application.getInstance().getController().getScene()
@@ -139,7 +204,6 @@ class BrickLayers(Extension):
         if not gcode_list:
             return
 
-        # Don't process twice
         if _BRICK_LAYERS_MARKER in gcode_list[0]:
             return
 
@@ -148,11 +212,9 @@ class BrickLayers(Extension):
         gcode_dict[active_build_plate_id] = gcode_list
         setattr(scene, "gcode_dict", gcode_dict)
 
-        # Refresh the preview layer data so the Z-shifts are visible
         self._refreshPreviewLayerData(scene, gcode_list)
 
     def _refreshPreviewLayerData(self, scene, gcode_list: List[str]) -> None:
-        """Re-parse modified GCode into layer data and update the preview."""
         try:
             from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
             from cura.LayerDataDecorator import LayerDataDecorator
@@ -208,18 +270,17 @@ class BrickLayers(Extension):
         if global_stack is None:
             return data
 
-        # Read settings from the print profile (mangled names)
         layer_height = float(global_stack.getProperty("layer_height", "value"))
         extrusion_multiplier = float(global_stack.getProperty(
-            _S + "brick_layers_extrusion_multiplier", "value"))
+            "brick_layers_extrusion_multiplier", "value"))
         start_layer = int(global_stack.getProperty(
-            _S + "brick_layers_start_layer", "value"))
+            "brick_layers_start_layer", "value"))
         end_layer = int(global_stack.getProperty(
-            _S + "brick_layers_end_layer", "value"))
+            "brick_layers_end_layer", "value"))
         apply_inner = bool(global_stack.getProperty(
-            _S + "brick_layers_apply_inner_walls", "value"))
+            "brick_layers_apply_inner_walls", "value"))
         apply_outer = bool(global_stack.getProperty(
-            _S + "brick_layers_apply_outer_walls", "value"))
+            "brick_layers_apply_outer_walls", "value"))
 
         z_shift = layer_height / 2.0
 
