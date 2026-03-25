@@ -11,8 +11,9 @@
                 "description": "Shift alternating inner wall perimeter loops up by half a layer height, creating interlocking brick-like walls. This dramatically improves vertical part strength by preventing aligned layer seams.",
                 "type": "bool",
                 "default_value": false,
-                "settable_per_mesh": true,
-                "settable_per_extruder": true,
+                "settable_per_mesh": false,
+                "settable_per_extruder": false,
+                "settable_per_meshgroup": false,
                 "children":
                 {
                     "brick_layers_extrusion_multiplier":
@@ -26,8 +27,9 @@
                         "minimum_value_warning": "0.8",
                         "maximum_value_warning": "1.5",
                         "enabled": "brick_layers_enabled",
-                        "settable_per_mesh": true,
-                        "settable_per_extruder": true
+                        "settable_per_mesh": false,
+                        "settable_per_extruder": false,
+                        "settable_per_meshgroup": false
                     },
                     "brick_layers_start_layer":
                     {
@@ -60,8 +62,9 @@
                         "type": "bool",
                         "default_value": true,
                         "enabled": "brick_layers_enabled",
-                        "settable_per_mesh": true,
-                        "settable_per_extruder": true
+                        "settable_per_mesh": false,
+                        "settable_per_extruder": false,
+                        "settable_per_meshgroup": false
                     },
                     "brick_layers_apply_outer_walls":
                     {
@@ -70,8 +73,9 @@
                         "type": "bool",
                         "default_value": false,
                         "enabled": "brick_layers_enabled",
-                        "settable_per_mesh": true,
-                        "settable_per_extruder": true
+                        "settable_per_mesh": false,
+                        "settable_per_extruder": false,
+                        "settable_per_meshgroup": false
                     }
                 }
             }
