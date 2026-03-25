@@ -4,22 +4,19 @@
 #
 # Shifts alternating perimeter wall loops up by half a layer height,
 # creating interlocking brick-like walls for dramatically stronger prints.
+#
+# Settings are defined in fdmprinter.def.json under the "experimental"
+# category and appear in Cura's sidebar like any other print setting.
 
-import os
 import re
 from typing import List, Optional, Tuple
-
-from PyQt6.QtCore import QObject, pyqtProperty, pyqtSignal, pyqtSlot
 
 from UM.Application import Application
 from UM.Extension import Extension
 from UM.Logger import Logger
 from UM.PluginRegistry import PluginRegistry
-from UM.i18n import i18nCatalog
 
 from cura.CuraApplication import CuraApplication
-
-i18n_catalog = i18nCatalog("cura")
 
 # Sentinel comment to prevent double-processing
 _BRICK_LAYERS_MARKER = ";BRICKLAYERS_PROCESSED"
@@ -66,126 +63,32 @@ class PerimeterLoop:
             self.prefix_lines.append(line)
 
 
-class BrickLayers(QObject, Extension):
+class BrickLayers(Extension):
 
-    settingsChanged = pyqtSignal()
-
-    def __init__(self, parent=None) -> None:
-        QObject.__init__(self, parent)
-        Extension.__init__(self)
-
-        self.setMenuName(i18n_catalog.i18nc("@item:inmenu", "Brick Layers"))
-        self.addMenuItem(
-            i18n_catalog.i18nc("@item:inmenu", "Settings"),
-            self.showDialog)
-
-        self._dialog = None
-
-        self._preferences = Application.getInstance().getPreferences()
-        self._preferences.addPreference("bricklayers/enabled", False)
-        self._preferences.addPreference("bricklayers/layer_height", 0.2)
-        self._preferences.addPreference("bricklayers/extrusion_multiplier", 1.05)
-        self._preferences.addPreference("bricklayers/start_layer", 3)
-        self._preferences.addPreference("bricklayers/end_layer", -1)
-        self._preferences.addPreference("bricklayers/apply_to_inner_walls", True)
-        self._preferences.addPreference("bricklayers/apply_to_outer_walls", False)
-
+    def __init__(self) -> None:
+        super().__init__()
         Application.getInstance().getOutputDeviceManager().writeStarted.connect(
             self._onWriteStarted)
-        CuraApplication.getInstance().mainWindowChanged.connect(self._createDialog)
 
     # ------------------------------------------------------------------ #
-    # Dialog management
+    # Settings (read from global container stack — defined in fdmprinter.def.json)
     # ------------------------------------------------------------------ #
 
-    def _createDialog(self) -> None:
-        plugin_path = PluginRegistry.getInstance().getPluginPath("BrickLayers")
-        if plugin_path is None:
-            return
-        path = os.path.join(plugin_path, "BrickLayersDialog.qml")
-        self._dialog = CuraApplication.getInstance().createQmlComponent(
-            path, {"manager": self})
-
-    def showDialog(self) -> None:
-        if self._dialog is None:
-            self._createDialog()
-        if self._dialog:
-            self._dialog.show()
+    @staticmethod
+    def _getSetting(key: str):
+        """Read a setting from the global container stack."""
+        global_stack = CuraApplication.getInstance().getGlobalContainerStack()
+        if global_stack is None:
+            return None
+        return global_stack.getProperty(key, "value")
 
     # ------------------------------------------------------------------ #
-    # QML property getters
+    # GCode pipeline hook
     # ------------------------------------------------------------------ #
-
-    @pyqtProperty(bool, notify=settingsChanged)
-    def enabled(self) -> bool:
-        return bool(self._preferences.getValue("bricklayers/enabled"))
-
-    @pyqtProperty(float, notify=settingsChanged)
-    def layerHeight(self) -> float:
-        return float(self._preferences.getValue("bricklayers/layer_height"))
-
-    @pyqtProperty(float, notify=settingsChanged)
-    def extrusionMultiplier(self) -> float:
-        return float(self._preferences.getValue("bricklayers/extrusion_multiplier"))
-
-    @pyqtProperty(int, notify=settingsChanged)
-    def startLayer(self) -> int:
-        return int(self._preferences.getValue("bricklayers/start_layer"))
-
-    @pyqtProperty(int, notify=settingsChanged)
-    def endLayer(self) -> int:
-        return int(self._preferences.getValue("bricklayers/end_layer"))
-
-    @pyqtProperty(bool, notify=settingsChanged)
-    def applyToInnerWalls(self) -> bool:
-        return bool(self._preferences.getValue("bricklayers/apply_to_inner_walls"))
-
-    @pyqtProperty(bool, notify=settingsChanged)
-    def applyToOuterWalls(self) -> bool:
-        return bool(self._preferences.getValue("bricklayers/apply_to_outer_walls"))
-
-    # ------------------------------------------------------------------ #
-    # QML property setters (slots)
-    # ------------------------------------------------------------------ #
-
-    @pyqtSlot(bool)
-    def setEnabled(self, value: bool) -> None:
-        self._preferences.setValue("bricklayers/enabled", value)
-        self.settingsChanged.emit()
-
-    @pyqtSlot(float)
-    def setLayerHeight(self, value: float) -> None:
-        self._preferences.setValue("bricklayers/layer_height", value)
-        self.settingsChanged.emit()
-
-    @pyqtSlot(float)
-    def setExtrusionMultiplier(self, value: float) -> None:
-        self._preferences.setValue("bricklayers/extrusion_multiplier", value)
-        self.settingsChanged.emit()
-
-    @pyqtSlot(int)
-    def setStartLayer(self, value: int) -> None:
-        self._preferences.setValue("bricklayers/start_layer", value)
-        self.settingsChanged.emit()
-
-    @pyqtSlot(int)
-    def setEndLayer(self, value: int) -> None:
-        self._preferences.setValue("bricklayers/end_layer", value)
-        self.settingsChanged.emit()
-
-    @pyqtSlot(bool)
-    def setApplyToInnerWalls(self, value: bool) -> None:
-        self._preferences.setValue("bricklayers/apply_to_inner_walls", value)
-        self.settingsChanged.emit()
-
-    @pyqtSlot(bool)
-    def setApplyToOuterWalls(self, value: bool) -> None:
-        self._preferences.setValue("bricklayers/apply_to_outer_walls", value)
-        self.settingsChanged.emit()
 
     def _onWriteStarted(self, output_device) -> None:
         """Hook into GCode write pipeline — modify GCode before saving."""
-        if not self._preferences.getValue("bricklayers/enabled"):
+        if not self._getSetting("brick_layers_enabled"):
             return
 
         scene = Application.getInstance().getController().getScene()
@@ -213,17 +116,11 @@ class BrickLayers(QObject, Extension):
         self._refreshPreviewLayerData(scene, gcode_list)
 
     def _refreshPreviewLayerData(self, scene, gcode_list: List[str]) -> None:
-        """Re-parse modified GCode into layer data and update the preview.
-
-        Uses the GCodeReader plugin's FlavorParser to parse the modified
-        GCode back into LayerData, then replaces the existing preview data
-        on the scene node so the Z-shifted loops are visible in the layer view.
-        """
+        """Re-parse modified GCode into layer data and update the preview."""
         try:
             from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
             from cura.LayerDataDecorator import LayerDataDecorator
 
-            # Find the scene node that holds the current layer data
             target_node = None
             for node in DepthFirstIterator(scene.getRoot()):
                 if node.callDecoration("getLayerData"):
@@ -233,10 +130,8 @@ class BrickLayers(QObject, Extension):
             if target_node is None:
                 return
 
-            # Get the GCodeReader plugin to re-parse our modified GCode
             gcode_reader = PluginRegistry.getInstance().getPluginObject("GCodeReader")
             if gcode_reader is None:
-                Logger.log("w", "BrickLayers: GCodeReader plugin not available for preview refresh")
                 return
 
             gcode_stream = "\n".join(gcode_list)
@@ -246,12 +141,10 @@ class BrickLayers(QObject, Extension):
             if result_node is None:
                 return
 
-            # Extract the new layer data from the parsed result
             new_layer_data = result_node.callDecoration("getLayerData")
             if new_layer_data is None:
                 return
 
-            # Replace the layer data on the existing scene node
             old_decorator = target_node.getDecorator(LayerDataDecorator)
             if old_decorator:
                 old_decorator.setLayerData(new_layer_data)
@@ -260,14 +153,11 @@ class BrickLayers(QObject, Extension):
                 decorator.setLayerData(new_layer_data)
                 target_node.addDecorator(decorator)
 
-            # Reset the SimulationView cache so it picks up the new data
             view = Application.getInstance().getController().getActiveView()
             if hasattr(view, "resetLayerData"):
                 view.resetLayerData()
 
-            # Notify the scene that data changed so the preview refreshes
             scene.sceneChanged.emit(target_node)
-
             Logger.log("d", "BrickLayers: Preview layer data refreshed")
 
         except Exception:
@@ -278,12 +168,17 @@ class BrickLayers(QObject, Extension):
     # ------------------------------------------------------------------ #
 
     def _execute(self, data: List[str]) -> List[str]:
-        layer_height = float(self._preferences.getValue("bricklayers/layer_height"))
-        extrusion_multiplier = float(self._preferences.getValue("bricklayers/extrusion_multiplier"))
-        start_layer = int(self._preferences.getValue("bricklayers/start_layer"))
-        end_layer = int(self._preferences.getValue("bricklayers/end_layer"))
-        apply_inner = bool(self._preferences.getValue("bricklayers/apply_to_inner_walls"))
-        apply_outer = bool(self._preferences.getValue("bricklayers/apply_to_outer_walls"))
+        global_stack = CuraApplication.getInstance().getGlobalContainerStack()
+        if global_stack is None:
+            return data
+
+        # Read settings from the print profile
+        layer_height = float(global_stack.getProperty("layer_height", "value"))
+        extrusion_multiplier = float(global_stack.getProperty("brick_layers_extrusion_multiplier", "value"))
+        start_layer = int(global_stack.getProperty("brick_layers_start_layer", "value"))
+        end_layer = int(global_stack.getProperty("brick_layers_end_layer", "value"))
+        apply_inner = bool(global_stack.getProperty("brick_layers_apply_inner_walls", "value"))
+        apply_outer = bool(global_stack.getProperty("brick_layers_apply_outer_walls", "value"))
 
         z_shift = layer_height / 2.0
 
@@ -343,11 +238,6 @@ class BrickLayers(QObject, Extension):
 
     @staticmethod
     def _getValue(line: str, key: str, default=None):
-        """Extract a parameter value from a GCode line.
-
-        When requesting key='X' from line 'G1 X100 Y50' the value 100.0 is
-        returned.
-        """
         if key not in line or (";" in line and line.find(key) > line.find(";")):
             return default
         sub_part = line[line.find(key) + 1:]
@@ -364,11 +254,6 @@ class BrickLayers(QObject, Extension):
 
     @staticmethod
     def _putValue(line: str = "", **kwargs) -> str:
-        """Reconstruct a GCode line with modified parameter values.
-
-        Preserves existing parameters and comment; overrides only those
-        specified in kwargs.
-        """
         if ";" in line:
             comment = line[line.find(";"):]
             line = line[:line.find(";")]
@@ -401,7 +286,6 @@ class BrickLayers(QObject, Extension):
 
     def _detect_gcode_params(self, data: List[str]
                               ) -> Tuple[bool, float, float, float]:
-        """Scan GCode header to detect extrusion mode and retraction params."""
         relative_extrusion = True
         retract_length = 5.0
         retract_speed = 2400.0
@@ -488,11 +372,8 @@ class BrickLayers(QObject, Extension):
                        relative_extrusion: bool,
                        retract_length: float, retract_speed: float,
                        travel_speed: float) -> Optional[str]:
-        """Process a single layer: group perimeter loops and shift alternating ones."""
-
         lines = layer_gcode.split("\n")
 
-        # Find the current Z height from the layer
         current_z = None
         for line in lines:
             stripped = line.strip()
@@ -507,7 +388,6 @@ class BrickLayers(QObject, Extension):
 
         shifted_z = round(current_z + z_shift, 4)
 
-        # Parse the layer into sections
         sections = []
         current_type = None
         current_loops: List[PerimeterLoop] = []
@@ -521,7 +401,6 @@ class BrickLayers(QObject, Extension):
             if stripped.startswith(";TYPE:"):
                 new_type = stripped[6:]
 
-                # Flush loops when leaving a target section
                 if in_target_section and new_type not in target_types:
                     if current_loop and current_loop.has_extrusion:
                         current_loops.append(current_loop)
@@ -554,7 +433,6 @@ class BrickLayers(QObject, Extension):
                 other_lines.append(line)
                 continue
 
-            # In a target perimeter section — group into loops
             is_g0 = stripped.startswith("G0 ")
             is_g1 = stripped.startswith("G1 ")
 
@@ -598,7 +476,6 @@ class BrickLayers(QObject, Extension):
                     current_loop = PerimeterLoop(current_type or "WALL-INNER")
                 current_loop.add_line(line, None, None, False)
 
-        # Flush remaining loops
         if in_target_section:
             if current_loop and current_loop.has_extrusion:
                 current_loops.append(current_loop)
@@ -615,7 +492,6 @@ class BrickLayers(QObject, Extension):
         if not has_loops:
             return None
 
-        # Extrusion multiplier for shifted loops
         if is_first_brick:
             effective_multiplier = extrusion_multiplier * 1.5
         elif is_last_brick:
@@ -623,7 +499,6 @@ class BrickLayers(QObject, Extension):
         else:
             effective_multiplier = extrusion_multiplier
 
-        # Separate loops into kept (at original Z) and deferred (to shifted Z)
         output_lines = []
         all_deferred: List[PerimeterLoop] = []
         deferred_type = None
@@ -653,24 +528,20 @@ class BrickLayers(QObject, Extension):
         if not all_deferred:
             return None
 
-        # === Emit deferred loops at shifted Z ===
         is_retracted = self._check_retracted_state(output_lines, relative_extrusion)
 
         output_lines.append(
             ";BrickLayers: shifted loops at Z=%.4f (offset +%.3f)" % (shifted_z, z_shift))
         output_lines.append(";TYPE:%s" % (deferred_type or "WALL-INNER"))
 
-        # Retract if not already retracted
         if not is_retracted and relative_extrusion:
             output_lines.append(
                 "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, -retract_length))
             is_retracted = True
 
-        # Move to shifted Z
         output_lines.append(
             "G0 F%.0f Z%.4f ;BrickLayers Z-shift" % (travel_speed, shifted_z))
 
-        # Emit each deferred loop with proper transitions
         for i, loop in enumerate(all_deferred):
             if loop.start_x is not None or loop.start_y is not None:
                 travel_parts = ["G0"]
@@ -699,12 +570,10 @@ class BrickLayers(QObject, Extension):
                             retract_speed, -retract_length))
                     is_retracted = True
 
-        # Retract before Z-restore
         if not is_retracted and relative_extrusion:
             output_lines.append(
                 "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, -retract_length))
 
-        # Restore original Z — leave retracted for the next section
         output_lines.append(";BrickLayers: restoring Z=%.4f" % current_z)
         output_lines.append(
             "G0 F%.0f Z%.4f ;BrickLayers Z-restore" % (travel_speed, current_z))
@@ -713,7 +582,6 @@ class BrickLayers(QObject, Extension):
 
     def _check_retracted_state(self, lines: List[str],
                                 relative_extrusion: bool) -> bool:
-        """Check retraction state by scanning recent output lines backwards."""
         scan_lines = lines[-20:] if len(lines) > 20 else lines
         for line in reversed(scan_lines):
             if self._is_retraction(line, relative_extrusion):
@@ -731,7 +599,6 @@ class BrickLayers(QObject, Extension):
 
     def _apply_extrusion_multiplier(self, lines: List[str], multiplier: float,
                                      relative_extrusion: bool) -> List[str]:
-        """Apply extrusion multiplier to G1 extrusion moves."""
         if multiplier == 1.0:
             return list(lines)
 
