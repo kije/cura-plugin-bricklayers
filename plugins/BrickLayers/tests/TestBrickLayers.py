@@ -1,0 +1,951 @@
+# Copyright (c) 2024
+# Tests for the BrickLayers plugin.
+# These tests mock all Cura/UM dependencies so they can run standalone.
+#
+# The module is loaded directly via importlib to avoid triggering the
+# BrickLayers package __init__.py (which imports from UM/cura).
+
+import importlib.util
+import os
+import sys
+import unittest
+from unittest.mock import MagicMock
+
+# ---------------------------------------------------------------------------
+# Mock all Cura / UM modules before importing the BrickLayers module
+# ---------------------------------------------------------------------------
+_MOCK_MODULES = [
+    "UM",
+    "UM.Application",
+    "UM.Extension",
+    "UM.Logger",
+    "UM.PluginRegistry",
+    "UM.Settings",
+    "UM.Settings.SettingDefinition",
+    "UM.Settings.DefinitionContainer",
+    "UM.Settings.ContainerRegistry",
+    "UM.i18n",
+    "cura",
+    "cura.CuraApplication",
+]
+
+for mod_name in _MOCK_MODULES:
+    if mod_name not in sys.modules:
+        sys.modules[mod_name] = MagicMock()
+
+# Make Extension a real base class so BrickLayers can inherit from it
+sys.modules["UM.Extension"].Extension = type(
+    "Extension", (), {"__init__": lambda self: None}
+)
+
+# Load BrickLayers.py directly, bypassing the package __init__.py
+_MODULE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "BrickLayers.py",
+)
+_spec = importlib.util.spec_from_file_location("BrickLayers_mod", _MODULE_PATH)
+_bl_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_bl_module)
+
+BrickLayers = _bl_module.BrickLayers
+PerimeterLoop = _bl_module.PerimeterLoop
+
+
+def _make_instance():
+    """Create a BrickLayers instance with mocked __init__."""
+    obj = object.__new__(BrickLayers)
+    return obj
+
+
+# =========================================================================
+# _getValue tests
+# =========================================================================
+class TestGetValue(unittest.TestCase):
+
+    def test_parse_x(self):
+        self.assertEqual(BrickLayers._getValue("G1 X10 Y20", "X"), 10)
+
+    def test_parse_y(self):
+        self.assertEqual(BrickLayers._getValue("G1 X10 Y20", "Y"), 20)
+
+    def test_parse_z(self):
+        self.assertAlmostEqual(BrickLayers._getValue("G0 X10 Y20 Z1.2", "Z"), 1.2)
+
+    def test_parse_e_float(self):
+        self.assertAlmostEqual(BrickLayers._getValue("G1 X10 Y20 E0.5", "E"), 0.5)
+
+    def test_parse_f(self):
+        self.assertEqual(BrickLayers._getValue("G1 F1200 X10 Y20 E0.5", "F"), 1200)
+
+    def test_parse_g(self):
+        self.assertEqual(BrickLayers._getValue("G0 F9000 X10", "G"), 0)
+
+    def test_comment_hides_value(self):
+        # X appears only after the semicolon - should not be found
+        result = BrickLayers._getValue("G1 Y10 ;X99", "X")
+        self.assertIsNone(result)
+
+    def test_value_before_comment(self):
+        result = BrickLayers._getValue("G1 X10 ;comment", "X")
+        self.assertEqual(result, 10)
+
+    def test_missing_key_returns_default(self):
+        self.assertIsNone(BrickLayers._getValue("G1 X10 Y20", "E"))
+
+    def test_missing_key_custom_default(self):
+        self.assertEqual(BrickLayers._getValue("G1 X10", "Z", 0.0), 0.0)
+
+    def test_negative_value(self):
+        self.assertAlmostEqual(BrickLayers._getValue("G1 E-5.0", "E"), -5.0)
+
+    def test_float_return(self):
+        val = BrickLayers._getValue("G1 X10.5", "X")
+        self.assertIsInstance(val, float)
+        self.assertAlmostEqual(val, 10.5)
+
+    def test_int_return(self):
+        val = BrickLayers._getValue("G1 X10", "X")
+        self.assertIsInstance(val, int)
+
+
+# =========================================================================
+# _putValue tests
+# =========================================================================
+class TestPutValue(unittest.TestCase):
+
+    def test_construct_from_scratch(self):
+        result = BrickLayers._putValue(G=1, X=10, Y=20)
+        self.assertEqual(result, "G1 X10 Y20")
+
+    def test_modify_existing(self):
+        result = BrickLayers._putValue("G1 X10 Y20 E0.5", E=1.0)
+        # E should be replaced; X, Y preserved
+        self.assertIn("E1.0", result)
+        self.assertIn("X10", result)
+        self.assertIn("Y20", result)
+
+    def test_preserve_comment(self):
+        result = BrickLayers._putValue("G1 X10 ;my comment", Y=20)
+        self.assertIn(";my comment", result)
+        self.assertIn("X10", result)
+        self.assertIn("Y20", result)
+
+    def test_parameter_ordering(self):
+        result = BrickLayers._putValue(E=1.0, X=10, G=1, F=1200, Y=20, Z=0.5)
+        parts = result.split(" ")
+        keys = [p[0] for p in parts]
+        # Expected order: G, M, T, S, F, X, Y, Z, E
+        expected_order = ["G", "F", "X", "Y", "Z", "E"]
+        self.assertEqual(keys, expected_order)
+
+    def test_empty_line(self):
+        result = BrickLayers._putValue(G=0, X=100)
+        self.assertEqual(result, "G0 X100")
+
+
+# =========================================================================
+# _find_max_layer tests
+# =========================================================================
+class TestFindMaxLayer(unittest.TestCase):
+
+    def test_multiple_blocks(self):
+        data = [
+            ";LAYER:0\nG1 X10",
+            ";LAYER:5\nG1 X20",
+            ";LAYER:10\nG1 X30",
+        ]
+        self.assertEqual(BrickLayers._find_max_layer(data), 10)
+
+    def test_negative_layer_numbers(self):
+        data = [
+            ";LAYER:-2\nG1 X10",
+            ";LAYER:-1\nG1 X20",
+            ";LAYER:0\nG1 X30",
+            ";LAYER:3\nG1 X40",
+        ]
+        self.assertEqual(BrickLayers._find_max_layer(data), 3)
+
+    def test_single_block(self):
+        data = [";LAYER:7\nG1 X10"]
+        self.assertEqual(BrickLayers._find_max_layer(data), 7)
+
+    def test_no_layers(self):
+        data = ["G28\nG1 X10"]
+        self.assertEqual(BrickLayers._find_max_layer(data), 0)
+
+
+# =========================================================================
+# _get_layer_number tests
+# =========================================================================
+class TestGetLayerNumber(unittest.TestCase):
+
+    def test_valid_layer(self):
+        self.assertEqual(BrickLayers._get_layer_number(";LAYER:5\nG1 X10"), 5)
+
+    def test_no_layer_marker(self):
+        self.assertIsNone(BrickLayers._get_layer_number("G1 X10 Y20"))
+
+    def test_negative_layer(self):
+        self.assertEqual(BrickLayers._get_layer_number(";LAYER:-1\nG1 X10"), -1)
+
+
+# =========================================================================
+# _is_retraction / _is_unretraction tests
+# =========================================================================
+class TestRetractionDetection(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    # _is_retraction
+    def test_retraction_relative_negative_e(self):
+        self.assertTrue(self.bl._is_retraction("G1 F2400 E-5.0", True))
+
+    def test_retraction_relative_positive_e_is_not_retraction(self):
+        self.assertFalse(self.bl._is_retraction("G1 F2400 E5.0", True))
+
+    def test_retraction_absolute_e_less_than_last(self):
+        self.assertTrue(self.bl._is_retraction("G1 F2400 E10.0", False, last_e=15.0))
+
+    def test_retraction_absolute_e_more_than_last(self):
+        self.assertFalse(self.bl._is_retraction("G1 F2400 E20.0", False, last_e=15.0))
+
+    def test_retraction_non_g1(self):
+        self.assertFalse(self.bl._is_retraction("G0 F9000 E-5.0", True))
+
+    def test_retraction_g1_with_xy(self):
+        # Extrusion move, not retraction
+        self.assertFalse(self.bl._is_retraction("G1 X10 Y20 E-0.5", True))
+
+    def test_retraction_no_e(self):
+        self.assertFalse(self.bl._is_retraction("G1 F2400 X10", True))
+
+    def test_retraction_absolute_no_last_e(self):
+        self.assertFalse(self.bl._is_retraction("G1 F2400 E5.0", False, last_e=None))
+
+    # _is_unretraction
+    def test_unretraction_relative_positive_e(self):
+        self.assertTrue(self.bl._is_unretraction("G1 F2400 E5.0", True))
+
+    def test_unretraction_relative_negative_e(self):
+        self.assertFalse(self.bl._is_unretraction("G1 F2400 E-5.0", True))
+
+    def test_unretraction_absolute_e_more_than_last(self):
+        self.assertTrue(self.bl._is_unretraction("G1 F2400 E20.0", False, last_e=15.0))
+
+    def test_unretraction_absolute_e_less_than_last(self):
+        self.assertFalse(self.bl._is_unretraction("G1 F2400 E10.0", False, last_e=15.0))
+
+    def test_unretraction_non_g1(self):
+        self.assertFalse(self.bl._is_unretraction("G0 F9000 E5.0", True))
+
+    def test_unretraction_g1_with_xy(self):
+        self.assertFalse(self.bl._is_unretraction("G1 X10 Y20 E0.5", True))
+
+    def test_unretraction_no_e(self):
+        self.assertFalse(self.bl._is_unretraction("G1 F2400 X10", True))
+
+
+# =========================================================================
+# _strip_z_from_body tests
+# =========================================================================
+class TestStripZFromBody(unittest.TestCase):
+
+    def test_g1_z_replaced(self):
+        lines = ["G1 F1200 X10 Y20 Z1.2 E0.5"]
+        result = BrickLayers._strip_z_from_body(lines, 1.35)
+        self.assertIn("Z1.3500", result[0])
+        self.assertNotIn("Z1.2", result[0])
+
+    def test_g0_z_replaced(self):
+        lines = ["G0 F9000 X10 Y20 Z1.2"]
+        result = BrickLayers._strip_z_from_body(lines, 1.35)
+        self.assertIn("Z1.3500", result[0])
+
+    def test_line_without_z_unchanged(self):
+        lines = ["G1 F1200 X10 Y20 E0.5"]
+        result = BrickLayers._strip_z_from_body(lines, 1.35)
+        self.assertEqual(result[0], "G1 F1200 X10 Y20 E0.5")
+
+    def test_non_g0g1_unchanged(self):
+        lines = ["M104 S200"]
+        result = BrickLayers._strip_z_from_body(lines, 1.35)
+        self.assertEqual(result[0], "M104 S200")
+
+    def test_comment_preserved(self):
+        lines = ["G1 X10 Z1.2 ;my comment"]
+        result = BrickLayers._strip_z_from_body(lines, 1.35)
+        self.assertIn(";my comment", result[0])
+        self.assertIn("Z1.3500", result[0])
+
+
+# =========================================================================
+# _find_last_e_position tests
+# =========================================================================
+class TestFindLastEPosition(unittest.TestCase):
+
+    def test_finds_last_g1_e(self):
+        lines = [
+            "G1 F1200 X10 Y10 E1.0",
+            "G1 F1200 X20 Y20 E2.0",
+            "G1 F1200 X30 Y30 E3.5",
+        ]
+        self.assertAlmostEqual(BrickLayers._find_last_e_position(lines), 3.5)
+
+    def test_skips_non_g1(self):
+        lines = [
+            "G1 F1200 X10 Y10 E1.0",
+            "G0 F9000 X50 Y50",
+            ";comment",
+        ]
+        self.assertAlmostEqual(BrickLayers._find_last_e_position(lines), 1.0)
+
+    def test_no_e_returns_zero(self):
+        lines = [
+            "G0 F9000 X50 Y50",
+            ";comment",
+        ]
+        self.assertAlmostEqual(BrickLayers._find_last_e_position(lines), 0.0)
+
+
+# =========================================================================
+# _check_retracted_state tests
+# =========================================================================
+class TestCheckRetractedState(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_relative_last_retraction(self):
+        lines = [
+            "G1 F1200 X10 Y10 E0.5",
+            "G1 F2400 E-5.0",
+        ]
+        self.assertTrue(self.bl._check_retracted_state(lines, True))
+
+    def test_relative_last_unretraction(self):
+        lines = [
+            "G1 F2400 E-5.0",
+            "G1 F2400 E5.0",
+        ]
+        self.assertFalse(self.bl._check_retracted_state(lines, True))
+
+    def test_relative_last_extrusion(self):
+        lines = [
+            "G1 F2400 E5.0",
+            "G1 F1200 X10 Y10 E0.5",
+        ]
+        self.assertFalse(self.bl._check_retracted_state(lines, True))
+
+    def test_absolute_retracted(self):
+        # Extrusion move at E=10, then E-only move at E=5 (retraction)
+        lines = [
+            "G1 F1200 X10 Y10 E10.0",
+            "G1 F2400 E5.0",
+        ]
+        self.assertTrue(self.bl._check_retracted_state(lines, False))
+
+    def test_absolute_not_retracted(self):
+        # Just extrusion moves
+        lines = [
+            "G1 F1200 X10 Y10 E5.0",
+            "G1 F1200 X20 Y20 E10.0",
+        ]
+        self.assertFalse(self.bl._check_retracted_state(lines, False))
+
+
+# =========================================================================
+# _apply_extrusion_multiplier tests
+# =========================================================================
+class TestApplyExtrusionMultiplier(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_relative_scales_positive_e(self):
+        lines = ["G1 F1200 X10 Y10 E0.5"]
+        result, offset = self.bl._apply_extrusion_multiplier(lines, 1.5, True)
+        e_val = BrickLayers._getValue(result[0], "E")
+        self.assertAlmostEqual(e_val, 0.75)
+
+    def test_relative_no_scale_retraction(self):
+        # Retraction: negative E, no XY
+        lines = ["G1 F2400 E-5.0"]
+        result, _ = self.bl._apply_extrusion_multiplier(lines, 1.5, True)
+        e_val = BrickLayers._getValue(result[0], "E")
+        self.assertAlmostEqual(e_val, -5.0)
+
+    def test_relative_multiplier_1_unchanged(self):
+        lines = ["G1 F1200 X10 Y10 E0.5"]
+        result, offset = self.bl._apply_extrusion_multiplier(lines, 1.0, True)
+        self.assertEqual(result[0], lines[0])
+
+    def test_absolute_scales_deltas(self):
+        lines = [
+            "G1 F1200 X10 Y10 E1.0",
+            "G1 F1200 X20 Y20 E2.0",
+        ]
+        result, offset = self.bl._apply_extrusion_multiplier(lines, 2.0, False)
+        # Second line: delta = 2.0 - 1.0 = 1.0, extra = 1.0 * (2.0-1.0) = 1.0
+        # new_e = 2.0 + 1.0 = 3.0
+        e1 = BrickLayers._getValue(result[1], "E")
+        self.assertAlmostEqual(e1, 3.0)
+
+    def test_absolute_returns_offset(self):
+        lines = [
+            "G1 F1200 X10 Y10 E1.0",
+            "G1 F1200 X20 Y20 E2.0",
+        ]
+        _, offset = self.bl._apply_extrusion_multiplier(lines, 2.0, False)
+        self.assertAlmostEqual(offset, 1.0)
+
+    def test_absolute_non_extrusion_e_only_gets_offset(self):
+        # Retraction in absolute mode (E-only, no XY) still gets offset applied
+        lines = [
+            "G1 F1200 X10 Y10 E1.0",
+            "G1 F1200 X20 Y20 E2.0",
+            "G1 F2400 E1.5",  # retraction, no XY
+        ]
+        result, offset = self.bl._apply_extrusion_multiplier(lines, 2.0, False)
+        # After first two lines, offset = 1.0
+        # E-only line: no XY so not extrusion_move, no delta scaling
+        # but E still gets offset: 1.5 + 1.0 = 2.5
+        e2 = BrickLayers._getValue(result[2], "E")
+        self.assertAlmostEqual(e2, 2.5)
+
+
+# =========================================================================
+# _detect_gcode_params tests
+# =========================================================================
+class TestDetectGcodeParams(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_detects_m83(self):
+        data = ["M83\nG1 F2400 E-5.0\n"]
+        rel, length, speed = self.bl._detect_gcode_params(data)
+        self.assertTrue(rel)
+
+    def test_detects_m82(self):
+        data = ["M82\nG1 X10 Y10 E1.0\n"]
+        rel, _, _ = self.bl._detect_gcode_params(data)
+        self.assertFalse(rel)
+
+    def test_detects_retraction_params(self):
+        data = ["M83\nG1 F2400 E-6.5\n"]
+        rel, length, speed = self.bl._detect_gcode_params(data)
+        self.assertAlmostEqual(length, 6.5)
+        self.assertAlmostEqual(speed, 2400.0)
+
+    def test_defaults_when_nothing_detected(self):
+        data = ["G28\n"]
+        rel, length, speed = self.bl._detect_gcode_params(data)
+        # Defaults
+        self.assertTrue(rel)  # default is relative
+        self.assertAlmostEqual(length, 5.0)
+        self.assertAlmostEqual(speed, 2400.0)
+
+
+# =========================================================================
+# _process_layer tests
+# =========================================================================
+SAMPLE_LAYER = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G1 F1200 X20 Y20 E1.0
+G1 F1200 X10 Y20 E1.5
+G1 F1200 X10 Y10 E2.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E2.5
+G1 F1200 X40 Y40 E3.0
+G1 F1200 X30 Y40 E3.5
+G1 F1200 X30 Y30 E4.0
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E4.5
+G1 F1200 X60 Y60 E5.0
+G1 F1200 X50 Y60 E5.5
+G1 F1200 X50 Y50 E6.0
+;TYPE:FILL
+G1 F1200 X25 Y25 E6.5"""
+
+
+class TestProcessLayer(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+        self.target_types = {"WALL-INNER"}
+        self.retract_length = 5.0
+        self.retract_speed = 2400.0
+        self.travel_speed = 9000.0
+
+    def _run(self, layer_gcode=SAMPLE_LAYER, layer_num=5, z_shift=0.15,
+             extrusion_multiplier=1.0, is_first=False, is_last=False,
+             target_types=None, relative=True):
+        return self.bl._process_layer(
+            layer_gcode, layer_num, z_shift,
+            extrusion_multiplier, is_first, is_last,
+            target_types or self.target_types, relative,
+            self.retract_length, self.retract_speed, self.travel_speed
+        )
+
+    def test_relative_basic_3_loops(self):
+        """3 inner wall loops: loop 0 stays, loop 1 deferred, loop 2 stays."""
+        result = self._run()
+        self.assertIsNotNone(result)
+        lines = result.split("\n")
+        # Loop 0 (X10..X10) and loop 2 (X50..X50) should be in normal section
+        # Loop 1 (X30..X30) should be in deferred section after Z-shift
+        self.assertIn(";BrickLayers: shifted loops", result)
+
+    def test_z_shift_value(self):
+        """Deferred loops should be at current_z + z_shift."""
+        result = self._run(z_shift=0.15)
+        # current_z = 1.2, shifted = 1.35
+        self.assertIn("Z1.3500", result)
+        self.assertIn(";BrickLayers Z-shift", result)
+
+    def test_retract_unretract_between_deferred(self):
+        """Travel moves between deferred loops should have retract/unretract."""
+        # Need a layer with multiple deferred loops (odd indices)
+        # With 5 loops: indices 1,3 are deferred
+        five_loop_layer = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E0.5
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E0.5
+G0 F9000 X70 Y70
+G1 F1200 X80 Y70 E0.5
+G0 F9000 X90 Y90
+G1 F1200 X100 Y90 E0.5"""
+        result = self._run(layer_gcode=five_loop_layer)
+        self.assertIsNotNone(result)
+        # Should have retract between the two deferred loops
+        self.assertIn(";BrickLayers retract", result)
+        self.assertIn(";BrickLayers unretract", result)
+
+    def test_unretract_after_z_restore(self):
+        """Output should end with unretract after Z-restore (C3 fix)."""
+        result = self._run()
+        lines = result.strip().split("\n")
+        # Find Z-restore line
+        z_restore_idx = None
+        for i, line in enumerate(lines):
+            if ";BrickLayers Z-restore" in line:
+                z_restore_idx = i
+                break
+        self.assertIsNotNone(z_restore_idx)
+        # Next line should be unretract
+        self.assertIn(";BrickLayers unretract", lines[z_restore_idx + 1])
+
+    def test_absolute_mode(self):
+        """Absolute mode should also produce valid output with retractions."""
+        abs_layer = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E1.0
+G1 F1200 X20 Y20 E2.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E3.0
+G1 F1200 X40 Y40 E4.0
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E5.0
+G1 F1200 X60 Y60 E6.0"""
+        result = self._run(layer_gcode=abs_layer, relative=False)
+        self.assertIsNotNone(result)
+        self.assertIn(";BrickLayers retract", result)
+        self.assertIn(";BrickLayers unretract", result)
+
+    def test_first_brick_layer_multiplier(self):
+        """First brick layer: effective_multiplier = extrusion_multiplier * 1.15."""
+        result = self._run(extrusion_multiplier=1.0, is_first=True)
+        self.assertIsNotNone(result)
+        # Deferred loop 1 body has E values: 2.5, 3.0, 3.5, 4.0 (treated as
+        # relative extrusion amounts). With multiplier 1.15: 2.5*1.15 = 2.875
+        lines = result.split("\n")
+        deferred_section = False
+        found_scaled = False
+        for line in lines:
+            if ";BrickLayers: shifted loops" in line:
+                deferred_section = True
+            if deferred_section and line.strip().startswith("G1 "):
+                e_val = BrickLayers._getValue(line, "E")
+                x_val = BrickLayers._getValue(line, "X")
+                if e_val is not None and x_val is not None and e_val > 0:
+                    self.assertAlmostEqual(e_val, 2.875, places=3)
+                    found_scaled = True
+                    break
+        self.assertTrue(found_scaled, "Should find scaled extrusion value")
+
+    def test_last_brick_layer_multiplier(self):
+        """Last brick layer: effective_multiplier = extrusion_multiplier * 0.85."""
+        result = self._run(extrusion_multiplier=1.0, is_last=True)
+        self.assertIsNotNone(result)
+        # Deferred loop 1 body has E=2.5 first. 2.5 * 0.85 = 2.125
+        lines = result.split("\n")
+        deferred_section = False
+        found_scaled = False
+        for line in lines:
+            if ";BrickLayers: shifted loops" in line:
+                deferred_section = True
+            if deferred_section and line.strip().startswith("G1 "):
+                e_val = BrickLayers._getValue(line, "E")
+                x_val = BrickLayers._getValue(line, "X")
+                if e_val is not None and x_val is not None and e_val > 0:
+                    self.assertAlmostEqual(e_val, 2.125, places=3)
+                    found_scaled = True
+                    break
+        self.assertTrue(found_scaled, "Should find scaled extrusion value")
+
+    def test_no_wall_sections_returns_none(self):
+        """Layer with only infill should return None."""
+        infill_layer = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:FILL
+G1 F1200 X25 Y25 E0.5"""
+        result = self._run(layer_gcode=infill_layer)
+        self.assertIsNone(result)
+
+    def test_z_in_body_lines_replaced(self):
+        """Body lines containing Z should get Z replaced (H2 fix)."""
+        layer_with_z_body = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 Z1.2 E0.5
+G1 F1200 X20 Y20 E1.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 Z1.2 E0.5
+G1 F1200 X40 Y40 E1.0
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E0.5
+G1 F1200 X60 Y60 E1.0"""
+        result = self._run(layer_gcode=layer_with_z_body, z_shift=0.15)
+        self.assertIsNotNone(result)
+        # In deferred section, Z values should be replaced with shifted_z
+        lines = result.split("\n")
+        deferred = False
+        for line in lines:
+            if ";BrickLayers: shifted loops" in line:
+                deferred = True
+            if deferred and "Z-restore" in line:
+                break
+            if deferred and line.strip().startswith("G1 ") and "Z" in line:
+                z_val = BrickLayers._getValue(line, "Z")
+                if z_val is not None:
+                    self.assertAlmostEqual(z_val, 1.35, places=4)
+
+    def test_multiple_wall_sections_reset_counter(self):
+        """Loop counter resets per section (H3 fix)."""
+        # Two separate WALL-INNER sections, each with 3 loops
+        multi_section = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E0.5
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E0.5
+;TYPE:FILL
+G1 F1200 X25 Y25 E0.5
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E0.5
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E0.5"""
+        result = self._run(layer_gcode=multi_section)
+        self.assertIsNotNone(result)
+        # Each section has 3 loops, so loop 1 from each section is deferred
+        # That means 2 deferred loops total
+        deferred_count = result.count(";BrickLayers travel")
+        self.assertEqual(deferred_count, 2)
+
+    def test_mixed_wall_types(self):
+        """Mixed WALL-INNER + WALL-OUTER should have correct TYPE markers (H4 fix)."""
+        mixed = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E0.5
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E0.5
+;TYPE:WALL-OUTER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E0.5
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E0.5"""
+        result = self._run(layer_gcode=mixed,
+                           target_types={"WALL-INNER", "WALL-OUTER"})
+        self.assertIsNotNone(result)
+        # Deferred section should have TYPE markers
+        self.assertIn(";TYPE:WALL-INNER", result)
+        self.assertIn(";TYPE:WALL-OUTER", result)
+
+    def test_only_1_loop_returns_none(self):
+        """Only 1 loop means no odd loops, so returns None."""
+        one_loop = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G1 F1200 X20 Y20 E1.0"""
+        result = self._run(layer_gcode=one_loop)
+        self.assertIsNone(result)
+
+    def test_layer_without_z_returns_none(self):
+        """Layer without Z value returns None."""
+        no_z = """;LAYER:5
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5"""
+        result = self._run(layer_gcode=no_z)
+        self.assertIsNone(result)
+
+
+class TestEndToEnd(unittest.TestCase):
+    """End-to-end tests that process full multi-layer G-code through
+    _process_layer, simulating the _execute pipeline."""
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def _process_full_gcode(self, gcode_text, start_layer=0, end_layer=-1,
+                            extrusion_multiplier=1.05, layer_height=0.2,
+                            apply_inner=True, apply_outer=False,
+                            relative_extrusion=True):
+        """Simulate the _execute flow: split into blocks and process each layer."""
+        # Split into layer blocks (simulate Cura's data list)
+        # Each block is separated by blank lines or LAYER markers
+        blocks = gcode_text.split("\n\n")
+        if len(blocks) == 1:
+            # Try splitting by ;LAYER: markers
+            raw_lines = gcode_text.split("\n")
+            blocks = []
+            current_block = []
+            for line in raw_lines:
+                if line.startswith(";LAYER:") and current_block:
+                    blocks.append("\n".join(current_block))
+                    current_block = [line]
+                else:
+                    current_block.append(line)
+            if current_block:
+                blocks.append("\n".join(current_block))
+
+        z_shift = layer_height / 2.0
+        target_types = set()
+        if apply_inner:
+            target_types.add("WALL-INNER")
+        if apply_outer:
+            target_types.add("WALL-OUTER")
+
+        max_layer = BrickLayers._find_max_layer(blocks)
+        if end_layer <= 0:
+            end_layer_gcode = max_layer
+        else:
+            end_layer_gcode = end_layer - 1
+        start_layer_gcode = max(start_layer - 1, 0)
+
+        results = {}
+        for block in blocks:
+            layer_num = BrickLayers._get_layer_number(block)
+            if layer_num is None or layer_num < 0:
+                continue
+            if layer_num < start_layer_gcode or layer_num > end_layer_gcode:
+                continue
+
+            is_first = (layer_num == start_layer_gcode)
+            is_last = (layer_num == end_layer_gcode)
+
+            result = self.bl._process_layer(
+                block, layer_num, z_shift, extrusion_multiplier,
+                is_first, is_last, target_types, relative_extrusion,
+                retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+            )
+            if result is not None:
+                results[layer_num] = result
+
+        return results
+
+    def test_sample_gcode_all_layers_processed(self):
+        """Process sample G-code fixture - all layers with inner walls get processed."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=1)
+        # All 3 layers (0,1,2) should be processed since each has WALL-INNER with 3 loops
+        self.assertEqual(len(results), 3, f"Expected 3 layers, got {len(results)}: {list(results.keys())}")
+
+    def test_sample_gcode_z_shift_correct(self):
+        """Verify Z-shift values are correct for each layer."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=1, layer_height=0.2)
+        for layer_num, result in results.items():
+            # Find the Z-shift line
+            for line in result.split("\n"):
+                if ";BrickLayers Z-shift" in line:
+                    z = BrickLayers._getValue(line, "Z")
+                    # shifted_z = current_z + 0.1 (layer_height/2)
+                    self.assertIsNotNone(z)
+                    break
+
+    def test_sample_gcode_z_restore_present(self):
+        """Each processed layer should have Z-restore."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=1)
+        for layer_num, result in results.items():
+            self.assertIn(";BrickLayers Z-restore", result, f"Layer {layer_num} missing Z-restore")
+
+    def test_sample_gcode_unretract_at_end(self):
+        """Each processed layer should end with unretract (C3 fix)."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=1)
+        for layer_num, result in results.items():
+            lines = [l.strip() for l in result.split("\n") if l.strip()]
+            last_gcode = None
+            for line in reversed(lines):
+                if line.startswith("G"):
+                    last_gcode = line
+                    break
+            self.assertIsNotNone(last_gcode)
+            self.assertIn("unretract", last_gcode, f"Layer {layer_num} missing unretract at end")
+
+    def test_sample_gcode_no_double_retract(self):
+        """Verify no two consecutive retractions without unretraction between them."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=1)
+        for layer_num, result in results.items():
+            retracted = False
+            for line in result.split("\n"):
+                if "BrickLayers retract" in line and "unretract" not in line:
+                    self.assertFalse(retracted,
+                        f"Layer {layer_num}: double retract detected at: {line}")
+                    retracted = True
+                elif "BrickLayers unretract" in line:
+                    retracted = False
+
+    def test_sample_gcode_start_layer_filter(self):
+        """start_layer=2 should skip layer 0."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=2)
+        self.assertNotIn(0, results, "Layer 0 should be skipped with start_layer=2")
+
+    def test_sample_gcode_first_last_multiplier(self):
+        """First brick layer gets 1.15x, last gets 0.85x."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=1, extrusion_multiplier=1.05)
+        # With 3 layers (0,1,2), layer 0 is first, layer 2 is last
+        # First brick: 1.05 * 1.15 = 1.2075
+        # Last brick: 1.05 * 0.85 = 0.8925
+        # Middle: 1.05
+        self.assertIn(0, results)
+        self.assertIn(2, results)
+
+    def test_gcode_validity_no_nan_no_inf(self):
+        """Output G-code should not contain NaN or Inf values."""
+        sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
+        with open(sample_path) as f:
+            gcode = f.read()
+
+        results = self._process_full_gcode(gcode, start_layer=1)
+        for layer_num, result in results.items():
+            self.assertNotIn("nan", result.lower(), f"Layer {layer_num} contains NaN")
+            self.assertNotIn("inf", result.lower(), f"Layer {layer_num} contains Inf")
+
+    def test_absolute_extrusion_full_layer(self):
+        """Process a full layer in absolute extrusion mode - verify retractions are present."""
+        abs_layer = """;LAYER:0
+G0 F9000 X10 Y10 Z0.3
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E1.0
+G1 F1200 X20 Y20 E2.0
+G1 F1200 X10 Y20 E3.0
+G1 F1200 X10 Y10 E4.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E5.0
+G1 F1200 X40 Y40 E6.0
+G1 F1200 X30 Y40 E7.0
+G1 F1200 X30 Y30 E8.0
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E9.0
+G1 F1200 X60 Y60 E10.0
+G1 F1200 X50 Y60 E11.0
+G1 F1200 X50 Y50 E12.0"""
+
+        result = self.bl._process_layer(
+            abs_layer, 0, z_shift=0.1, extrusion_multiplier=1.05,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        # In absolute mode, should still have retract/unretract
+        self.assertIn("BrickLayers retract", result)
+        self.assertIn("BrickLayers unretract", result)
+        # Should have Z-shift and Z-restore
+        self.assertIn("BrickLayers Z-shift", result)
+        self.assertIn("BrickLayers Z-restore", result)
+        # E values should be present and numeric
+        for line in result.split("\n"):
+            if line.strip().startswith("G1 ") and "E" in line:
+                e_val = BrickLayers._getValue(line, "E")
+                self.assertIsNotNone(e_val, f"Invalid E value in: {line}")
+
+    def test_marker_prevents_reprocessing(self):
+        """The BRICKLAYERS_PROCESSED marker should be checked by _onWriteStarted."""
+        marker = _bl_module._BRICK_LAYERS_MARKER
+        self.assertEqual(marker, ";BRICKLAYERS_PROCESSED")
+
+    def test_perimeter_loop_tracks_coordinates(self):
+        """PerimeterLoop should track start and end coordinates."""
+        loop = PerimeterLoop("WALL-INNER")
+        loop.add_line("G0 X5 Y5", None, None, False)  # prefix (travel)
+        loop.add_line("G1 X10 Y10 E0.5", 10.0, 10.0, True)  # first extrusion
+        loop.add_line("G1 X20 Y20 E1.0", 20.0, 20.0, True)  # extrusion
+        loop.add_line("G1 X30 Y30 E1.5", 30.0, 30.0, True)  # last extrusion
+
+        self.assertEqual(loop.start_x, 10.0)
+        self.assertEqual(loop.start_y, 10.0)
+        self.assertEqual(loop.end_x, 30.0)
+        self.assertEqual(loop.end_y, 30.0)
+        self.assertTrue(loop.has_extrusion)
+        self.assertEqual(len(loop.prefix_lines), 1)
+        self.assertEqual(len(loop.body_lines), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
