@@ -281,32 +281,44 @@ class TestStripZFromBody(unittest.TestCase):
 
 
 # =========================================================================
-# _find_last_e_position tests
+# _convert_to_relative_e tests
 # =========================================================================
-class TestFindLastEPosition(unittest.TestCase):
+class TestConvertToRelativeE(unittest.TestCase):
 
-    def test_finds_last_g1_e(self):
-        lines = [
-            "G1 F1200 X10 Y10 E1.0",
-            "G1 F1200 X20 Y20 E2.0",
-            "G1 F1200 X30 Y30 E3.5",
-        ]
-        self.assertAlmostEqual(BrickLayers._find_last_e_position(lines), 3.5)
+    def setUp(self):
+        self.bl = _make_instance()
 
-    def test_skips_non_g1(self):
-        lines = [
-            "G1 F1200 X10 Y10 E1.0",
-            "G0 F9000 X50 Y50",
-            ";comment",
-        ]
-        self.assertAlmostEqual(BrickLayers._find_last_e_position(lines), 1.0)
+    def test_basic_conversion(self):
+        gcode = "G1 F1200 X10 Y10 E100.0\nG1 F1200 X20 Y20 E101.0\nG1 F1200 X30 Y30 E102.5"
+        result, end_e = self.bl._convert_to_relative_e(gcode, 99.0)
+        lines = result.split("\n")
+        # First line: 100.0 - 99.0 = 1.0
+        self.assertAlmostEqual(BrickLayers._getValue(lines[0], "E"), 1.0)
+        # Second line: 101.0 - 100.0 = 1.0
+        self.assertAlmostEqual(BrickLayers._getValue(lines[1], "E"), 1.0)
+        # Third line: 102.5 - 101.0 = 1.5
+        self.assertAlmostEqual(BrickLayers._getValue(lines[2], "E"), 1.5)
+        self.assertAlmostEqual(end_e, 102.5)
 
-    def test_no_e_returns_zero(self):
-        lines = [
-            "G0 F9000 X50 Y50",
-            ";comment",
-        ]
-        self.assertAlmostEqual(BrickLayers._find_last_e_position(lines), 0.0)
+    def test_retraction_becomes_negative(self):
+        gcode = "G1 F1200 X10 Y10 E100.0\nG1 F2400 E95.0"
+        result, end_e = self.bl._convert_to_relative_e(gcode, 99.0)
+        lines = result.split("\n")
+        # Retraction: 95.0 - 100.0 = -5.0
+        self.assertAlmostEqual(BrickLayers._getValue(lines[1], "E"), -5.0)
+
+    def test_non_g1_lines_unchanged(self):
+        gcode = "G0 F9000 X50 Y50\n;comment\nG1 F1200 X10 Y10 E100.0"
+        result, end_e = self.bl._convert_to_relative_e(gcode, 99.0)
+        lines = result.split("\n")
+        self.assertEqual(lines[0], "G0 F9000 X50 Y50")
+        self.assertEqual(lines[1], ";comment")
+
+    def test_preserves_xy_values(self):
+        gcode = "G1 F1200 X10 Y20 E100.5"
+        result, _ = self.bl._convert_to_relative_e(gcode, 100.0)
+        self.assertIn("X10", result)
+        self.assertIn("Y20", result)
 
 
 # =========================================================================
@@ -338,21 +350,9 @@ class TestCheckRetractedState(unittest.TestCase):
         ]
         self.assertFalse(self.bl._check_retracted_state(lines, True))
 
-    def test_absolute_retracted(self):
-        # Extrusion move at E=10, then E-only move at E=5 (retraction)
-        lines = [
-            "G1 F1200 X10 Y10 E10.0",
-            "G1 F2400 E5.0",
-        ]
-        self.assertTrue(self.bl._check_retracted_state(lines, False))
-
-    def test_absolute_not_retracted(self):
-        # Just extrusion moves
-        lines = [
-            "G1 F1200 X10 Y10 E5.0",
-            "G1 F1200 X20 Y20 E10.0",
-        ]
-        self.assertFalse(self.bl._check_retracted_state(lines, False))
+    def test_empty_lines(self):
+        lines = [";comment", "G0 F9000 X10 Y10"]
+        self.assertFalse(self.bl._check_retracted_state(lines, True))
 
 
 # =========================================================================
@@ -365,54 +365,38 @@ class TestApplyExtrusionMultiplier(unittest.TestCase):
 
     def test_relative_scales_positive_e(self):
         lines = ["G1 F1200 X10 Y10 E0.5"]
-        result, offset = self.bl._apply_extrusion_multiplier(lines, 1.5, True)
+        result = self.bl._apply_extrusion_multiplier(lines, 1.5)
         e_val = BrickLayers._getValue(result[0], "E")
         self.assertAlmostEqual(e_val, 0.75)
 
     def test_relative_no_scale_retraction(self):
-        # Retraction: negative E, no XY
+        # Retraction: negative E, no XY - should not be scaled
         lines = ["G1 F2400 E-5.0"]
-        result, _ = self.bl._apply_extrusion_multiplier(lines, 1.5, True)
+        result = self.bl._apply_extrusion_multiplier(lines, 1.5)
         e_val = BrickLayers._getValue(result[0], "E")
         self.assertAlmostEqual(e_val, -5.0)
 
     def test_relative_multiplier_1_unchanged(self):
         lines = ["G1 F1200 X10 Y10 E0.5"]
-        result, offset = self.bl._apply_extrusion_multiplier(lines, 1.0, True)
+        result = self.bl._apply_extrusion_multiplier(lines, 1.0)
         self.assertEqual(result[0], lines[0])
 
-    def test_absolute_scales_deltas(self):
-        lines = [
-            "G1 F1200 X10 Y10 E1.0",
-            "G1 F1200 X20 Y20 E2.0",
-        ]
-        result, offset = self.bl._apply_extrusion_multiplier(lines, 2.0, False)
-        # Second line: delta = 2.0 - 1.0 = 1.0, extra = 1.0 * (2.0-1.0) = 1.0
-        # new_e = 2.0 + 1.0 = 3.0
-        e1 = BrickLayers._getValue(result[1], "E")
-        self.assertAlmostEqual(e1, 3.0)
+    def test_non_g1_lines_unchanged(self):
+        lines = ["G0 F9000 X10 Y10", ";comment"]
+        result = self.bl._apply_extrusion_multiplier(lines, 2.0)
+        self.assertEqual(result, lines)
 
-    def test_absolute_returns_offset(self):
-        lines = [
-            "G1 F1200 X10 Y10 E1.0",
-            "G1 F1200 X20 Y20 E2.0",
-        ]
-        _, offset = self.bl._apply_extrusion_multiplier(lines, 2.0, False)
-        self.assertAlmostEqual(offset, 1.0)
+    def test_no_e_value_unchanged(self):
+        lines = ["G1 F1200 X10 Y10"]
+        result = self.bl._apply_extrusion_multiplier(lines, 2.0)
+        self.assertEqual(result[0], lines[0])
 
-    def test_absolute_non_extrusion_e_only_gets_offset(self):
-        # Retraction in absolute mode (E-only, no XY) still gets offset applied
-        lines = [
-            "G1 F1200 X10 Y10 E1.0",
-            "G1 F1200 X20 Y20 E2.0",
-            "G1 F2400 E1.5",  # retraction, no XY
-        ]
-        result, offset = self.bl._apply_extrusion_multiplier(lines, 2.0, False)
-        # After first two lines, offset = 1.0
-        # E-only line: no XY so not extrusion_move, no delta scaling
-        # but E still gets offset: 1.5 + 1.0 = 2.5
-        e2 = BrickLayers._getValue(result[2], "E")
-        self.assertAlmostEqual(e2, 2.5)
+    def test_zero_e_not_scaled(self):
+        # E=0 (no extrusion) should not be scaled
+        lines = ["G1 F1200 X10 Y10 E0"]
+        result = self.bl._apply_extrusion_multiplier(lines, 2.0)
+        e_val = BrickLayers._getValue(result[0], "E")
+        self.assertEqual(e_val, 0)
 
 
 # =========================================================================
@@ -945,6 +929,166 @@ G1 F1200 X50 Y50 E12.0"""
         self.assertTrue(loop.has_extrusion)
         self.assertEqual(len(loop.prefix_lines), 1)
         self.assertEqual(len(loop.body_lines), 3)
+
+
+class TestAbsoluteExtrusion(unittest.TestCase):
+    """Tests specifically verifying absolute extrusion mode correctness.
+
+    The key bug was: when loops are reordered in absolute mode, the E values
+    become discontinuous (large jumps that cause extrusion during travel).
+    The fix converts to relative E (M83) for the processed layer, then
+    restores absolute mode (M82) with G92 at the end.
+    """
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_m83_m82_wrapper_present(self):
+        """Absolute mode output should be wrapped in M83...M82+G92."""
+        layer = """;LAYER:0
+G0 F9000 X10 Y10 Z0.3
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E100.5
+G1 F1200 X20 Y20 E101.0
+G1 F1200 X10 Y20 E101.5
+G1 F1200 X10 Y10 E102.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E102.5
+G1 F1200 X40 Y40 E103.0
+G1 F1200 X30 Y40 E103.5
+G1 F1200 X30 Y30 E104.0"""
+
+        result = self.bl._process_layer(
+            layer, 0, z_shift=0.15, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=100.0
+        )
+        self.assertIsNotNone(result)
+        lines = result.split("\n")
+        # Should start with M83
+        m83_found = any("M83" in l for l in lines)
+        self.assertTrue(m83_found, "Output should contain M83 for relative E switch")
+        # Should end with M82 + G92
+        m82_found = any("M82" in l for l in lines)
+        g92_found = any("G92" in l for l in lines)
+        self.assertTrue(m82_found, "Output should contain M82 to restore absolute E")
+        self.assertTrue(g92_found, "Output should contain G92 to sync E position")
+
+    def test_g92_syncs_to_original_end_e(self):
+        """G92 should set E to the original layer's end E value."""
+        layer = """;LAYER:0
+G0 F9000 X10 Y10 Z0.3
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E100.5
+G1 F1200 X20 Y20 E101.0
+G1 F1200 X10 Y20 E101.5
+G1 F1200 X10 Y10 E102.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E102.5
+G1 F1200 X40 Y40 E103.0
+G1 F1200 X30 Y40 E103.5
+G1 F1200 X30 Y30 E104.0"""
+
+        result = self.bl._process_layer(
+            layer, 0, z_shift=0.15, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=100.0
+        )
+        # The last E in the original layer is 104.0
+        # G92 should sync to this value
+        g92_lines = [l for l in result.split("\n") if "G92" in l]
+        self.assertEqual(len(g92_lines), 1)
+        e_val = BrickLayers._getValue(g92_lines[0], "E")
+        self.assertAlmostEqual(e_val, 104.0)
+
+    def test_no_large_e_jumps_in_relative_output(self):
+        """After conversion to relative E, there should be no large E jumps.
+
+        This is the core test for the absolute mode fix. In the old broken code,
+        reordered loops would have E values from their original position,
+        causing jumps of hundreds of mm.
+        """
+        layer = """;LAYER:5
+G0 F9000 X10 Y10 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E1100.5
+G1 F1200 X20 Y20 E1101.0
+G1 F1200 X10 Y20 E1101.5
+G1 F1200 X10 Y10 E1102.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E1102.5
+G1 F1200 X40 Y40 E1103.0
+G1 F1200 X30 Y40 E1103.5
+G1 F1200 X30 Y30 E1104.0
+G0 F9000 X50 Y50
+G1 F1200 X60 Y50 E1104.5
+G1 F1200 X60 Y60 E1105.0
+G1 F1200 X50 Y60 E1105.5
+G1 F1200 X50 Y50 E1106.0
+;TYPE:FILL
+G1 F1200 X25 Y25 E1106.5"""
+
+        result = self.bl._process_layer(
+            layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=1100.0
+        )
+        self.assertIsNotNone(result)
+
+        # After M83, all E values should be small deltas (< 10mm absolute)
+        in_relative = False
+        for line in result.split("\n"):
+            if "M83" in line:
+                in_relative = True
+                continue
+            if "M82" in line:
+                in_relative = False
+                continue
+            if not in_relative:
+                continue
+            stripped = line.strip()
+            if stripped.startswith("G1 "):
+                e = BrickLayers._getValue(stripped, "E")
+                if e is not None:
+                    self.assertLess(
+                        abs(e), 10.0,
+                        f"E value too large for relative mode: {e} in line: {line}")
+
+    def test_relative_mode_not_wrapped(self):
+        """In native relative mode, output should NOT have M83/M82/G92."""
+        layer = """;LAYER:0
+G0 F9000 X10 Y10 Z0.3
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G1 F1200 X20 Y20 E0.5
+G1 F1200 X10 Y20 E0.5
+G1 F1200 X10 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E0.5
+G1 F1200 X40 Y40 E0.5
+G1 F1200 X30 Y40 E0.5
+G1 F1200 X30 Y30 E0.5"""
+
+        result = self.bl._process_layer(
+            layer, 0, z_shift=0.15, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        self.assertNotIn("M83", result)
+        self.assertNotIn("M82", result)
+        self.assertNotIn("G92", result)
 
 
 if __name__ == "__main__":

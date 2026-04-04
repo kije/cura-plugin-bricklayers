@@ -330,14 +330,57 @@ class BrickLayers(Extension):
         start_layer_gcode = start_layer - 1
         layers_modified = 0
 
+        # For absolute extrusion mode: track E position across layers so we
+        # can convert each processed layer to relative E and back.
+        layer_start_e = 0.0
+        if not relative_extrusion:
+            # Scan data blocks before the first processable layer to find
+            # the E position at the start of processing.
+            for index in range(len(data)):
+                layer_num = self._get_layer_number(data[index])
+                if layer_num is not None and layer_num >= start_layer_gcode:
+                    break
+                for line in data[index].split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("G1 "):
+                        e = self._getValue(stripped, "E")
+                        if e is not None:
+                            layer_start_e = float(e)
+
         for index in range(len(data)):
             layer_gcode = data[index]
 
             layer_num = self._get_layer_number(layer_gcode)
             if layer_num is None or layer_num < 0:
+                # Non-layer block: track E for absolute mode
+                if not relative_extrusion:
+                    for line in layer_gcode.split("\n"):
+                        stripped = line.strip()
+                        if stripped.startswith("G1 "):
+                            e = self._getValue(stripped, "E")
+                            if e is not None:
+                                layer_start_e = float(e)
                 continue
             if layer_num < start_layer_gcode or layer_num > end_layer_gcode:
+                # Non-processed layer: track E for absolute mode
+                if not relative_extrusion:
+                    for line in layer_gcode.split("\n"):
+                        stripped = line.strip()
+                        if stripped.startswith("G1 "):
+                            e = self._getValue(stripped, "E")
+                            if e is not None:
+                                layer_start_e = float(e)
                 continue
+
+            # For absolute mode: find the original end E BEFORE modifying
+            original_layer_end_e = layer_start_e
+            if not relative_extrusion:
+                for line in layer_gcode.split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("G1 "):
+                        e = self._getValue(stripped, "E")
+                        if e is not None:
+                            original_layer_end_e = float(e)
 
             is_first_brick = (layer_num == start_layer_gcode)
             is_last_brick = (layer_num == end_layer_gcode)
@@ -346,12 +389,18 @@ class BrickLayers(Extension):
                 layer_gcode, layer_num, z_shift,
                 extrusion_multiplier, is_first_brick, is_last_brick,
                 target_types, relative_extrusion,
-                retract_length, retract_speed, travel_speed
+                retract_length, retract_speed, travel_speed,
+                layer_start_e
             )
 
             if new_layer is not None:
                 data[index] = new_layer
                 layers_modified += 1
+
+            # Update layer_start_e from ORIGINAL values (not modified)
+            # so subsequent layers' absolute E values remain in sync.
+            if not relative_extrusion:
+                layer_start_e = original_layer_end_e
 
         Logger.log("d", "BrickLayers: Modified %d layers (layers %d-%d, z_shift=%.3fmm)",
                    layers_modified, start_layer_gcode, end_layer_gcode, z_shift)
@@ -508,7 +557,20 @@ class BrickLayers(Extension):
                        is_last_brick: bool, target_types: set,
                        relative_extrusion: bool,
                        retract_length: float, retract_speed: float,
-                       travel_speed: float) -> Optional[str]:
+                       travel_speed: float,
+                       layer_start_e: float = 0.0) -> Optional[str]:
+
+        # For absolute extrusion mode: convert the entire layer to relative E
+        # BEFORE processing. This makes loop reordering safe since each E
+        # value becomes a self-contained delta rather than a positional value.
+        original_end_e = None
+        if not relative_extrusion:
+            layer_gcode, original_end_e = self._convert_to_relative_e(
+                layer_gcode, layer_start_e)
+
+        # After conversion, always process using relative extrusion logic
+        effective_relative = True
+
         lines = layer_gcode.split("\n")
 
         current_z = None
@@ -578,14 +640,11 @@ class BrickLayers(Extension):
                 x_val = self._getValue(stripped, "X")
                 y_val = self._getValue(stripped, "Y")
 
-                if relative_extrusion:
-                    is_extrusion = (e_val is not None and e_val > 0
-                                    and (x_val is not None or y_val is not None))
-                else:
-                    is_extrusion = (e_val is not None
-                                    and (x_val is not None or y_val is not None))
+                # Always use relative extrusion logic after conversion
+                is_extrusion = (e_val is not None and e_val > 0
+                                and (x_val is not None or y_val is not None))
 
-                is_retract = self._is_retraction(stripped, relative_extrusion)
+                is_retract = self._is_retraction(stripped, effective_relative)
 
                 if is_retract:
                     if current_loop and current_loop.has_extrusion:
@@ -638,6 +697,11 @@ class BrickLayers(Extension):
             effective_multiplier = extrusion_multiplier
 
         output_lines = []
+
+        # For absolute mode: insert M83 switch at the very start
+        if not relative_extrusion:
+            output_lines.append("M83 ;BrickLayers: relative E for reordered loops")
+
         # H3 fix: collect deferred loops per-section to reset alternation
         # H4 fix: track wall type per deferred loop for correct TYPE markers
         all_deferred: List[Tuple[PerimeterLoop, str]] = []
@@ -667,30 +731,20 @@ class BrickLayers(Extension):
         if not all_deferred:
             return None
 
-        # Determine the absolute E position at the end of the non-deferred
-        # output so we can track it for absolute mode retract/unretract.
-        abs_e_pos = self._find_last_e_position(output_lines) if not relative_extrusion else 0.0
-
-        is_retracted = self._check_retracted_state(output_lines, relative_extrusion)
+        is_retracted = self._check_retracted_state(output_lines, effective_relative)
 
         output_lines.append(
             ";BrickLayers: shifted loops at Z=%.4f (offset +%.3f)" % (shifted_z, z_shift))
 
-        # Retract before Z-shift travel (both relative and absolute modes)
+        # Retract before Z-shift travel (always relative E at this point)
         if not is_retracted:
-            if relative_extrusion:
-                output_lines.append(
-                    "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, -retract_length))
-            else:
-                abs_e_pos -= retract_length
-                output_lines.append(
-                    "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, abs_e_pos))
+            output_lines.append(
+                "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, -retract_length))
             is_retracted = True
 
         output_lines.append(
             "G0 F%.0f Z%.4f ;BrickLayers Z-shift" % (travel_speed, shifted_z))
 
-        abs_e_offset = 0.0  # Cumulative offset for absolute mode multiplier
         current_deferred_type = None
 
         for i, (loop, wall_type) in enumerate(all_deferred):
@@ -709,50 +763,32 @@ class BrickLayers(Extension):
                 output_lines.append(
                     " ".join(travel_parts) + " ;BrickLayers travel")
 
-            # C1 fix: unretract in both relative and absolute modes
+            # Unretract (always relative E)
             if is_retracted:
-                if relative_extrusion:
-                    output_lines.append(
-                        "G1 F%.0f E%.5f ;BrickLayers unretract" % (
-                            retract_speed, retract_length))
-                else:
-                    abs_e_pos += retract_length
-                    output_lines.append(
-                        "G1 F%.0f E%.5f ;BrickLayers unretract" % (
-                            retract_speed, abs_e_pos))
+                output_lines.append(
+                    "G1 F%.0f E%.5f ;BrickLayers unretract" % (
+                        retract_speed, retract_length))
                 is_retracted = False
 
             # H2 fix: strip Z values from deferred body lines to prevent
             # conflicting with the shifted Z position
             cleaned_body = self._strip_z_from_body(loop.body_lines, shifted_z)
 
-            body_with_multiplier, abs_e_offset = self._apply_extrusion_multiplier(
-                cleaned_body, effective_multiplier, relative_extrusion,
-                abs_e_offset)
+            body_with_multiplier = self._apply_extrusion_multiplier(
+                cleaned_body, effective_multiplier)
             output_lines.extend(body_with_multiplier)
 
-            # C1 fix: retract between deferred loops in both modes
+            # Retract between deferred loops
             if i < len(all_deferred) - 1:
-                if relative_extrusion:
-                    output_lines.append(
-                        "G1 F%.0f E%.5f ;BrickLayers retract" % (
-                            retract_speed, -retract_length))
-                else:
-                    abs_e_pos -= retract_length
-                    output_lines.append(
-                        "G1 F%.0f E%.5f ;BrickLayers retract" % (
-                            retract_speed, abs_e_pos))
+                output_lines.append(
+                    "G1 F%.0f E%.5f ;BrickLayers retract" % (
+                        retract_speed, -retract_length))
                 is_retracted = True
 
         # Retract before Z-restore travel
         if not is_retracted:
-            if relative_extrusion:
-                output_lines.append(
-                    "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, -retract_length))
-            else:
-                abs_e_pos -= retract_length
-                output_lines.append(
-                    "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, abs_e_pos))
+            output_lines.append(
+                "G1 F%.0f E%.5f ;BrickLayers retract" % (retract_speed, -retract_length))
 
         output_lines.append(";BrickLayers: restoring Z=%.4f" % current_z)
         output_lines.append(
@@ -760,65 +796,65 @@ class BrickLayers(Extension):
 
         # C3 fix: unretract after Z-restore so subsequent G-code finds
         # the nozzle in the expected primed state
-        if relative_extrusion:
+        output_lines.append(
+            "G1 F%.0f E%.5f ;BrickLayers unretract" % (retract_speed, retract_length))
+
+        # For absolute mode: restore M82 and sync E position with G92
+        if not relative_extrusion and original_end_e is not None:
+            output_lines.append("M82 ;BrickLayers: restore absolute E")
             output_lines.append(
-                "G1 F%.0f E%.5f ;BrickLayers unretract" % (retract_speed, retract_length))
-        else:
-            abs_e_pos += retract_length
-            output_lines.append(
-                "G1 F%.0f E%.5f ;BrickLayers unretract" % (retract_speed, abs_e_pos))
+                "G92 E%.5f ;BrickLayers: sync E position" % original_end_e)
 
         return "\n".join(output_lines)
 
     def _check_retracted_state(self, lines: List[str],
                                 relative_extrusion: bool) -> bool:
+        """Check if the nozzle is currently retracted based on recent lines.
+
+        After absolute-to-relative conversion, this is always called with
+        relative E values, so we only need the relative mode check.
+        """
         scan_lines = lines[-20:] if len(lines) > 20 else lines
-        if relative_extrusion:
-            for line in reversed(scan_lines):
-                if self._is_retraction(line, relative_extrusion):
-                    return True
-                if self._is_unretraction(line, relative_extrusion):
-                    return False
-                stripped = line.strip()
-                if stripped.startswith("G1 "):
-                    e_val = self._getValue(stripped, "E")
-                    x_val = self._getValue(stripped, "X")
-                    if e_val is not None and x_val is not None and e_val > 0:
-                        return False
-        else:
-            # Absolute mode: find last two E-only moves and compare
-            last_e = None
-            for line in reversed(scan_lines):
-                stripped = line.strip()
-                if not stripped.startswith("G1 "):
-                    continue
+        for line in reversed(scan_lines):
+            if self._is_retraction(line, relative_extrusion):
+                return True
+            if self._is_unretraction(line, relative_extrusion):
+                return False
+            stripped = line.strip()
+            if stripped.startswith("G1 "):
                 e_val = self._getValue(stripped, "E")
-                if e_val is None:
-                    continue
                 x_val = self._getValue(stripped, "X")
-                y_val = self._getValue(stripped, "Y")
-                if x_val is None and y_val is None:
-                    # E-only move (retract or unretract)
-                    if last_e is not None:
-                        return e_val > last_e  # Previous E was higher = retracted
-                    last_e = e_val
-                elif e_val is not None:
-                    # Extrusion move - nozzle is not retracted
-                    if last_e is not None and last_e < e_val:
-                        return True  # Last E-only move was below this = retracted
+                if e_val is not None and x_val is not None and e_val > 0:
                     return False
         return False
 
-    @staticmethod
-    def _find_last_e_position(lines: List[str]) -> float:
-        """Find the last absolute E position in the output lines."""
-        for line in reversed(lines):
+    def _convert_to_relative_e(self, layer_gcode: str,
+                                start_e: float) -> Tuple[str, float]:
+        """Convert all G1 E values in a layer from absolute to relative deltas.
+
+        Each absolute E value is replaced with the delta from the previous E.
+        This makes loop reordering safe since deltas are order-independent.
+
+        Returns (converted_gcode, original_end_e).
+        """
+        lines = layer_gcode.split("\n")
+        result = []
+        last_e = start_e
+        original_end_e = start_e
+
+        for line in lines:
             stripped = line.strip()
             if stripped.startswith("G1 "):
-                e_val = BrickLayers._getValue(stripped, "E")
+                e_val = self._getValue(stripped, "E")
                 if e_val is not None:
-                    return float(e_val)
-        return 0.0
+                    original_end_e = float(e_val)
+                    delta = round(float(e_val) - last_e, 5)
+                    last_e = float(e_val)
+                    result.append(self._putValue(stripped, E=delta))
+                    continue
+            result.append(line)
+
+        return "\n".join(result), original_end_e
 
     @staticmethod
     def _strip_z_from_body(lines: List[str], shifted_z: float) -> List[str]:
@@ -835,24 +871,16 @@ class BrickLayers(Extension):
             result.append(line)
         return result
 
-    def _apply_extrusion_multiplier(self, lines: List[str], multiplier: float,
-                                     relative_extrusion: bool,
-                                     abs_e_offset: float = 0.0
-                                     ) -> Tuple[List[str], float]:
-        """Apply extrusion multiplier to lines.
+    def _apply_extrusion_multiplier(self, lines: List[str],
+                                     multiplier: float) -> List[str]:
+        """Apply extrusion multiplier to lines with relative E values.
 
-        For relative mode, simply scales positive E values on extrusion moves.
-        For absolute mode, computes deltas between consecutive E values,
-        scales extrusion deltas, and reconstructs absolute E positions.
-
-        Returns (modified_lines, accumulated_e_offset) where
-        accumulated_e_offset tracks the cumulative E shift for absolute mode.
+        Scales positive E values on extrusion moves (G1 with X/Y and E > 0).
         """
         if multiplier == 1.0:
-            return list(lines), abs_e_offset
+            return list(lines)
 
         result = []
-        last_e: Optional[float] = None
         for line in lines:
             stripped = line.strip()
             if not stripped.startswith("G1 "):
@@ -868,22 +896,10 @@ class BrickLayers(Extension):
                 continue
 
             is_extrusion_move = (x_val is not None or y_val is not None)
-
-            if relative_extrusion:
-                if is_extrusion_move and e_val > 0:
-                    new_e = round(e_val * multiplier, 5)
-                    result.append(self._putValue(stripped, E=new_e))
-                else:
-                    result.append(line)
-            else:
-                # Absolute mode: adjust E by accumulated offset
-                if is_extrusion_move and last_e is not None:
-                    delta = e_val - last_e
-                    if delta > 0:
-                        extra = round(delta * (multiplier - 1.0), 5)
-                        abs_e_offset += extra
-                last_e = e_val
-                new_e = round(e_val + abs_e_offset, 5)
+            if is_extrusion_move and e_val > 0:
+                new_e = round(e_val * multiplier, 5)
                 result.append(self._putValue(stripped, E=new_e))
+            else:
+                result.append(line)
 
-        return result, abs_e_offset
+        return result
