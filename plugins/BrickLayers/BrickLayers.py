@@ -698,10 +698,6 @@ class BrickLayers(Extension):
 
         output_lines = []
 
-        # For absolute mode: insert M83 switch at the very start
-        if not relative_extrusion:
-            output_lines.append("M83 ;BrickLayers: relative E for reordered loops")
-
         # H3 fix: collect deferred loops per-section to reset alternation
         # H4 fix: track wall type per deferred loop for correct TYPE markers
         all_deferred: List[Tuple[PerimeterLoop, str]] = []
@@ -799,11 +795,10 @@ class BrickLayers(Extension):
         output_lines.append(
             "G1 F%.0f E%.5f ;BrickLayers unretract" % (retract_speed, retract_length))
 
-        # For absolute mode: restore M82 and sync E position with G92
-        if not relative_extrusion and original_end_e is not None:
-            output_lines.append("M82 ;BrickLayers: restore absolute E")
-            output_lines.append(
-                "G92 E%.5f ;BrickLayers: sync E position" % original_end_e)
+        # For absolute mode: convert relative E values back to absolute
+        # so the output uses only G0/G1 commands (no M82/M83/G92 needed).
+        if not relative_extrusion:
+            output_lines = self._convert_to_absolute_e(output_lines, layer_start_e)
 
         return "\n".join(output_lines)
 
@@ -855,6 +850,29 @@ class BrickLayers(Extension):
             result.append(line)
 
         return "\n".join(result), original_end_e
+
+    def _convert_to_absolute_e(self, lines: List[str],
+                                start_e: float) -> List[str]:
+        """Convert relative E values back to absolute by accumulating deltas.
+
+        Takes output lines with relative E and returns lines with absolute E,
+        starting from start_e. This avoids needing M83/M82/G92 commands which
+        some firmware (e.g. Ultimaker S5) does not support.
+        """
+        result = []
+        current_e = start_e
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("G1 "):
+                e_val = self._getValue(stripped, "E")
+                if e_val is not None:
+                    current_e = round(current_e + float(e_val), 5)
+                    result.append(self._putValue(stripped, E=current_e))
+                    continue
+            result.append(line)
+
+        return result
 
     @staticmethod
     def _strip_z_from_body(lines: List[str], shifted_z: float) -> List[str]:
