@@ -1699,5 +1699,101 @@ G1 F1200 X40 Y30 E1.5"""
             "Z-shift incorrectly used Z-hop value 3.5")
 
 
+# =========================================================================
+# E tracking across skipped layers (critical regression)
+# =========================================================================
+class TestETrackingAcrossSkippedLayers(unittest.TestCase):
+    """When _process_layer returns None (layer not modified), output_e
+    must still advance to match the unmodified layer's E values. If not,
+    the next modified layer starts its absolute E conversion from a stale
+    position, causing E values to drift negative."""
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_output_e_advances_on_unmodified_layers(self):
+        """Simulate: Layer 0 modified, Layer 1 NOT modified (last brick),
+        Layer 2 modified. Layer 2's E values must not go negative."""
+        layer0 = """;LAYER:0
+G0 F9000 X10 Y10 Z0.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E5.0
+G1 F1200 X20 Y20 E10.0
+G0 F9000 X12 Y12
+G1 F1200 X18 Y12 E15.0
+G1 F1200 X18 Y18 E20.0"""
+
+        # Process layer 0 (first brick, not last) → should modify
+        result0, end_e0 = self.bl._process_layer(
+            layer0, 0, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=True, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=0.0, output_start_e=0.0
+        )
+        self.assertIsNotNone(result0)
+        # end_e0 should be positive and close to 20
+        self.assertGreater(end_e0, 10.0,
+            f"Layer 0 end_e should be positive, got {end_e0}")
+
+        # Layer 1: NOT modified (is_last_brick=True → no deferral → returns None)
+        layer1 = """;LAYER:1
+G0 F9000 X10 Y10 Z0.4
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E25.0
+G1 F1200 X20 Y20 E30.0
+G0 F9000 X12 Y12
+G1 F1200 X18 Y12 E35.0
+G1 F1200 X18 Y18 E40.0"""
+
+        result1, end_e1 = self.bl._process_layer(
+            layer1, 1, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=True,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=20.0, output_start_e=end_e0
+        )
+        self.assertIsNone(result1)  # Not modified (last brick)
+
+        # CRITICAL: output_e must advance to layer 1's end E (40.0),
+        # not stay at end_e0. Simulate the _execute() logic:
+        original_layer1_end_e = 40.0
+        if result1 is not None:
+            output_e = end_e1
+        else:
+            output_e = original_layer1_end_e  # THE FIX
+
+        # Layer 2: processed
+        layer2 = """;LAYER:2
+G0 F9000 X10 Y10 Z0.6
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E45.0
+G1 F1200 X20 Y20 E50.0
+G0 F9000 X12 Y12
+G1 F1200 X18 Y12 E55.0
+G1 F1200 X18 Y18 E60.0"""
+
+        result2, end_e2 = self.bl._process_layer(
+            layer2, 2, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=40.0, output_start_e=output_e
+        )
+        self.assertIsNotNone(result2)
+
+        # All E values in result2 must be positive
+        for line in result2.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("G1 "):
+                e = self.bl._getValue(stripped, "E")
+                if e is not None:
+                    self.assertGreater(float(e), 0,
+                        f"Negative E in layer 2: {stripped}")
+
+
 if __name__ == "__main__":
     unittest.main()

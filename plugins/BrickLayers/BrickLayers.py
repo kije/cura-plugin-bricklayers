@@ -438,7 +438,12 @@ class BrickLayers(Extension):
             # Update E tracking for the next layer
             if not relative_extrusion:
                 original_e = original_layer_end_e
-                output_e = actual_end_e
+                if new_layer is not None:
+                    output_e = actual_end_e
+                else:
+                    # Layer wasn't modified — original E values pass through
+                    # unchanged, so output_e must match original_e
+                    output_e = original_layer_end_e
 
         Logger.log("d", "BrickLayers: Modified %d layers (layers %d-%d, z_shift=%.3fmm)",
                    layers_modified, start_layer_gcode, end_layer_gcode, z_shift)
