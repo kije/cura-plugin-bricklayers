@@ -45,6 +45,12 @@ class PerimeterLoop:
         self.start_y: Optional[float] = None
         self.end_x: Optional[float] = None
         self.end_y: Optional[float] = None
+        # Travel position: where the nozzle IS before the first extrusion
+        # (from the last G0 in the prefix). This is the correct start
+        # position for deferred loops — NOT start_x/y which is the
+        # DESTINATION of the first extrusion move.
+        self.travel_x: Optional[float] = None
+        self.travel_y: Optional[float] = None
 
     def add_line(self, line: str, x: Optional[float], y: Optional[float],
                  is_extrusion: bool) -> None:
@@ -65,6 +71,13 @@ class PerimeterLoop:
             self.body_lines.append(line)
         else:
             self.prefix_lines.append(line)
+            # Track G0 travel position in prefix
+            stripped = line.strip()
+            if stripped.startswith("G0 "):
+                if x is not None:
+                    self.travel_x = x
+                if y is not None:
+                    self.travel_y = y
 
 
 class BrickLayers(Extension):
@@ -696,7 +709,9 @@ class BrickLayers(Extension):
                     current_loop = PerimeterLoop(current_type or "WALL-INNER")
                 elif current_loop is None:
                     current_loop = PerimeterLoop(current_type or "WALL-INNER")
-                current_loop.add_line(line, None, None, False)
+                g0_x = self._getValue(stripped, "X")
+                g0_y = self._getValue(stripped, "Y")
+                current_loop.add_line(line, g0_x, g0_y, False)
             else:
                 if current_loop is None:
                     current_loop = PerimeterLoop(current_type or "WALL-INNER")
@@ -796,13 +811,19 @@ class BrickLayers(Extension):
                 output_lines.append(";TYPE:%s" % wall_type)
                 current_deferred_type = wall_type
 
-            if loop.start_x is not None or loop.start_y is not None:
+            # Use travel_x/y (G0 position from prefix) if available,
+            # otherwise fall back to start_x/y. travel_x/y is where the
+            # nozzle actually IS before the first extrusion, while
+            # start_x/y is the DESTINATION of the first extrusion move.
+            tx = loop.travel_x if loop.travel_x is not None else loop.start_x
+            ty = loop.travel_y if loop.travel_y is not None else loop.start_y
+            if tx is not None or ty is not None:
                 travel_parts = ["G0"]
                 travel_parts.append("F%.0f" % travel_speed)
-                if loop.start_x is not None:
-                    travel_parts.append("X%.3f" % loop.start_x)
-                if loop.start_y is not None:
-                    travel_parts.append("Y%.3f" % loop.start_y)
+                if tx is not None:
+                    travel_parts.append("X%.3f" % tx)
+                if ty is not None:
+                    travel_parts.append("Y%.3f" % ty)
                 output_lines.append(
                     " ".join(travel_parts) + " ;BrickLayers travel")
 

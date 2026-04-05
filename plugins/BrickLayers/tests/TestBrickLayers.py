@@ -516,6 +516,26 @@ class TestProcessLayer(unittest.TestCase):
         # Loop 1 (X30..X30) should be in deferred section after Z-shift
         self.assertIn(";BrickLayers: shifted loops", result)
 
+    def test_deferred_loop_travels_to_prefix_g0_position(self):
+        """Deferred loops must travel to the G0 prefix position (where
+        nozzle IS), not start_x/y (destination of first extrusion).
+
+        In SAMPLE_LAYER, loop 1 has: G0 X30 Y30 (prefix), G1 X40 Y30 (body).
+        The BrickLayers travel should go to X30 Y30, not X40 Y30.
+        Without this, the first extrusion segment (30,30)→(40,30) is lost.
+        """
+        result = self._run()
+        self.assertIsNotNone(result)
+        # Find the BrickLayers travel line for the deferred loop
+        lines = result.split("\n")
+        travel_lines = [l for l in lines if "BrickLayers travel" in l]
+        self.assertTrue(len(travel_lines) > 0)
+        first_travel = travel_lines[0]
+        # Should go to X30 (prefix G0 position), not X40 (first extrusion dest)
+        self.assertIn("X30.000", first_travel,
+            f"Travel should go to prefix G0 position X30, not first extrusion X40: {first_travel}")
+        self.assertIn("Y30.000", first_travel)
+
     def test_z_shift_value(self):
         """Deferred loops should be at current_z + z_shift."""
         result = self._run(z_shift=0.15)
@@ -971,6 +991,34 @@ G1 F1200 X50 Y50 E12.0"""
         self.assertTrue(loop.has_extrusion)
         self.assertEqual(len(loop.prefix_lines), 1)
         self.assertEqual(len(loop.body_lines), 3)
+
+    def test_perimeter_loop_tracks_travel_position(self):
+        """PerimeterLoop.travel_x/y should capture G0 position from prefix.
+
+        This is the actual nozzle position before the first extrusion, which
+        differs from start_x/y (destination of first extrusion). Using
+        start_x/y for deferred loop travel loses the first extrusion segment.
+        """
+        loop = PerimeterLoop("WALL-INNER")
+        loop.add_line("G1 F2700 E-5.0", None, None, False)  # retract
+        loop.add_line("G0 F9000 X100.0 Y200.0", 100.0, 200.0, False)  # travel
+        loop.add_line("G1 F2700 E5.0", None, None, False)  # unretract
+        loop.add_line("G1 X110.0 Y210.0 E0.5", 110.0, 210.0, True)  # 1st extrusion
+        loop.add_line("G1 X120.0 Y220.0 E1.0", 120.0, 220.0, True)
+
+        # travel_x/y = G0 position (where nozzle IS before extrusion)
+        self.assertEqual(loop.travel_x, 100.0)
+        self.assertEqual(loop.travel_y, 200.0)
+        # start_x/y = destination of first extrusion (different!)
+        self.assertEqual(loop.start_x, 110.0)
+        self.assertEqual(loop.start_y, 210.0)
+
+    def test_perimeter_loop_travel_none_without_g0(self):
+        """If prefix has no G0, travel_x/y should be None."""
+        loop = PerimeterLoop("WALL-INNER")
+        loop.add_line("G1 X10 Y10 E0.5", 10.0, 10.0, True)
+        self.assertIsNone(loop.travel_x)
+        self.assertIsNone(loop.travel_y)
 
 
 class TestAbsoluteExtrusion(unittest.TestCase):
