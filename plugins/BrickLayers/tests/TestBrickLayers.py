@@ -1593,5 +1593,111 @@ class TestPrefixHasTravel(unittest.TestCase):
         ]))
 
 
+# =========================================================================
+# Trailing lines preservation tests
+# =========================================================================
+class TestTrailingLinesPreserved(unittest.TestCase):
+    """Critical bug fix: when a wall section ends with retract/Z-hop/travel
+    before transitioning to FILL/SKIN, those lines were silently lost.
+    This caused stringing (no retract) and Z issues (lost Z-hop)."""
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_retract_zhop_travel_preserved_before_fill(self):
+        """Retract + Z-hop + travel at end of wall section must appear
+        in the output before the FILL section."""
+        layer = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G1 F1200 X20 Y20 E1.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E1.5
+G1 F1200 X40 Y40 E2.0
+G1 F2700 E-5.0
+G0 F9000 Z2.0
+G0 F9000 X50 Y50
+;TYPE:FILL
+G1 F630 Z1.2
+G1 F2700 E5.0
+G1 F1800 X55 Y55 E2.5"""
+        result, _ = self.bl._process_layer(
+            layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        lines = result.split("\n")
+        # Find the FILL section
+        fill_idx = None
+        for i, line in enumerate(lines):
+            if ";TYPE:FILL" in line:
+                fill_idx = i
+                break
+        self.assertIsNotNone(fill_idx, "FILL section not found in output")
+        # The retract, Z-hop, and travel should appear BEFORE ;TYPE:FILL
+        # (not lost/abandoned)
+        pre_fill = "\n".join(lines[:fill_idx])
+        self.assertIn("E-5.0", pre_fill,
+            "Retract before FILL section is missing — trailing lines were lost!")
+        self.assertIn("Z2.0", pre_fill,
+            "Z-hop before FILL section is missing — trailing lines were lost!")
+        self.assertIn("X50", pre_fill,
+            "Travel before FILL section is missing — trailing lines were lost!")
+
+    def test_trailing_lines_at_end_of_layer(self):
+        """Trailing retract/Z-hop at end of layer (wall section is last)
+        must be preserved."""
+        layer = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G1 F1200 X20 Y20 E1.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E1.5
+G1 F1200 X40 Y40 E2.0
+G1 F2700 E-5.0
+G0 F9000 Z2.0
+G0 F9000 X60 Y60"""
+        result, _ = self.bl._process_layer(
+            layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        # The trailing retract and Z-hop should still appear in the output
+        self.assertIn("Z2.0", result,
+            "Z-hop at end of layer is missing — trailing lines were lost!")
+
+    def test_z_detection_ignores_zhop(self):
+        """current_z should detect the layer working Z, not a Z-hop value."""
+        layer = """;LAYER:5
+G1 F630 Z3.5
+G0 F9000 X100 Y100
+G1 F630 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E1.5"""
+        result, _ = self.bl._process_layer(
+            layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        # The Z-shift should be 1.2 + 0.1 = 1.3, NOT 3.5 + 0.1 = 3.6
+        self.assertIn("Z1.3", result,
+            "Z-shift used wrong Z (should be 1.2, not Z-hop 3.5)")
+        self.assertNotIn("Z3.6", result,
+            "Z-shift incorrectly used Z-hop value 3.5")
+
+
 if __name__ == "__main__":
     unittest.main()

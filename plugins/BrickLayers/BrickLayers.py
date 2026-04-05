@@ -625,14 +625,37 @@ class BrickLayers(Extension):
 
         lines = layer_gcode.split("\n")
 
+        # Detect the layer's working Z. Strategy:
+        # 1. Prefer a G0/G1 with Z AND (X or Y) — a travel-to-layer move
+        # 2. Fall back to the LOWEST Z found before the first ;TYPE: marker
+        #    (Z-hops go UP from the layer Z, so lowest Z = working Z)
+        # 3. Fall back to the lowest Z found anywhere
+        # This avoids picking up Z-hop values which are always higher.
         current_z = None
+        min_z = None
+        min_z_before_type = None
+        found_type = False
         for line in lines:
             stripped = line.strip()
+            if stripped.startswith(";TYPE:"):
+                found_type = True
             if stripped.startswith("G0 ") or stripped.startswith("G1 "):
                 z_val = self._getValue(stripped, "Z")
                 if z_val is not None:
-                    current_z = z_val
-                    break
+                    z_float = float(z_val)
+                    if min_z is None or z_float < min_z:
+                        min_z = z_float
+                    if not found_type and (min_z_before_type is None
+                                           or z_float < min_z_before_type):
+                        min_z_before_type = z_float
+                    # A move with Z AND (X or Y) is a travel-to-layer
+                    x_val = self._getValue(stripped, "X")
+                    y_val = self._getValue(stripped, "Y")
+                    if x_val is not None or y_val is not None:
+                        current_z = z_val
+                        break
+        if current_z is None:
+            current_z = min_z_before_type if min_z_before_type is not None else min_z
 
         if current_z is None:
             return None, output_start_e
@@ -655,11 +678,22 @@ class BrickLayers(Extension):
                 if in_target_section and new_type not in target_types:
                     if current_loop and current_loop.has_extrusion:
                         current_loops.append(current_loop)
+                    # Preserve trailing non-extruding lines (retract/Z-hop/
+                    # travel) that belong between the wall section and the
+                    # next section. Without these, the nozzle doesn't retract
+                    # or Z-hop before traveling, causing stringing and Z issues.
+                    trailing = []
+                    if current_loop and not current_loop.has_extrusion:
+                        trailing.extend(current_loop.prefix_lines)
+                        trailing.extend(current_loop.body_lines)
                     if current_loops:
                         if other_lines:
                             sections.append(("other", list(other_lines)))
                             other_lines = []
                         sections.append(("loops", list(current_loops), current_type))
+                    # Add trailing lines to other_lines so they appear
+                    # AFTER the loops section in the output
+                    other_lines.extend(trailing)
                     current_loops = []
                     current_loop = None
                     in_target_section = False
@@ -729,12 +763,18 @@ class BrickLayers(Extension):
         if in_target_section:
             if current_loop and current_loop.has_extrusion:
                 current_loops.append(current_loop)
+            # Preserve trailing non-extruding lines at end of layer
+            trailing = []
+            if current_loop and not current_loop.has_extrusion:
+                trailing.extend(current_loop.prefix_lines)
+                trailing.extend(current_loop.body_lines)
             if current_loops:
                 if other_lines:
                     sections.append(("other", list(other_lines)))
                     other_lines = []
                 sections.append(("loops", list(current_loops), current_type))
                 current_loops = []
+            other_lines.extend(trailing)
         if other_lines:
             sections.append(("other", list(other_lines)))
 
