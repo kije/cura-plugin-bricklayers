@@ -630,37 +630,44 @@ class BrickLayers(Extension):
 
         lines = layer_gcode.split("\n")
 
-        # Detect the layer's working Z. Strategy:
-        # 1. Prefer a G0/G1 with Z AND (X or Y) — a travel-to-layer move
-        # 2. Fall back to the LOWEST Z found before the first ;TYPE: marker
-        #    (Z-hops go UP from the layer Z, so lowest Z = working Z)
-        # 3. Fall back to the lowest Z found anywhere
-        # This avoids picking up Z-hop values which are always higher.
+        # Detect the layer's working Z by tracking Z position and finding
+        # the Z at which the first extrusion occurs. This correctly handles
+        # Cura's common pattern where a high travel Z appears before the
+        # TYPE marker, then a Z-drop to the actual working height appears
+        # after it. Example from Cura output:
+        #   G0 Z2.03           ← travel height (tracked_z = 2.03)
+        #   ;TYPE:WALL-OUTER
+        #   G1 F630 Z0.78      ← Z-drop to working height (tracked_z = 0.78)
+        #   G1 X... Y... E...  ← first extrusion → current_z = 0.78
+        tracked_z = None
         current_z = None
-        min_z = None
-        min_z_before_type = None
-        found_type = False
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith(";TYPE:"):
-                found_type = True
             if stripped.startswith("G0 ") or stripped.startswith("G1 "):
                 z_val = self._getValue(stripped, "Z")
                 if z_val is not None:
-                    z_float = float(z_val)
-                    if min_z is None or z_float < min_z:
-                        min_z = z_float
-                    if not found_type and (min_z_before_type is None
-                                           or z_float < min_z_before_type):
-                        min_z_before_type = z_float
-                    # A move with Z AND (X or Y) is a travel-to-layer
-                    x_val = self._getValue(stripped, "X")
-                    y_val = self._getValue(stripped, "Y")
-                    if x_val is not None or y_val is not None:
-                        current_z = z_val
-                        break
+                    tracked_z = float(z_val)
+                e_val = self._getValue(stripped, "E")
+                x_val = self._getValue(stripped, "X")
+                y_val = self._getValue(stripped, "Y")
+                # First extrusion move (E > 0 in relative mode) with X or Y
+                if (e_val is not None and float(e_val) > 0
+                        and (x_val is not None or y_val is not None)):
+                    current_z = tracked_z
+                    break
         if current_z is None:
-            current_z = min_z_before_type if min_z_before_type is not None else min_z
+            # Fallback: use the lowest Z in the layer (Z-hops always go
+            # up from the working Z, so the minimum is the working Z)
+            min_z = None
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("G0 ") or stripped.startswith("G1 "):
+                    z_val = self._getValue(stripped, "Z")
+                    if z_val is not None:
+                        z_float = float(z_val)
+                        if min_z is None or z_float < min_z:
+                            min_z = z_float
+            current_z = min_z
 
         if current_z is None:
             return None, output_start_e

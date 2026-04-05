@@ -1698,6 +1698,55 @@ G1 F1200 X40 Y30 E1.5"""
         self.assertNotIn("Z3.6", result,
             "Z-shift incorrectly used Z-hop value 3.5")
 
+    def test_z_detection_zdrop_after_type_marker(self):
+        """Working Z after TYPE marker must be detected, not travel Z before it.
+
+        This is the exact pattern from Cura with adaptive layer heights:
+        G0 Z2.03 (travel height before TYPE) then G1 Z0.78 (working Z after TYPE).
+        """
+        layer = """;LAYER:3
+;MESH:plate10.stl
+G0 F9000 Z2.03
+;TYPE:WALL-OUTER
+G1 F630 Z0.78
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E1.5"""
+        result, _ = self.bl._process_layer(
+            layer, 3, z_shift=0.08, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-OUTER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        # Working Z = 0.78, shifted = 0.78 + 0.08 = 0.86
+        self.assertIn("Z0.86", result,
+            "Z-shift should use working Z 0.78 (after TYPE), not travel Z 2.03")
+        # Must NOT use travel Z: 2.03 + 0.08 = 2.11
+        self.assertNotIn("Z2.11", result,
+            "Z-shift incorrectly used travel Z 2.03 instead of working Z 0.78")
+
+    def test_z_detection_no_explicit_z_in_extrusion(self):
+        """When extrusion moves have no Z, use the last tracked Z."""
+        layer = """;LAYER:2
+G0 F9000 Z0.5
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E1.5"""
+        result, _ = self.bl._process_layer(
+            layer, 2, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        # Z = 0.5, shifted = 0.5 + 0.1 = 0.6
+        self.assertIn("Z0.6", result,
+            "Z-shift should use tracked Z 0.5 from G0 before extrusion")
+
 
 # =========================================================================
 # E tracking across skipped layers (critical regression)
