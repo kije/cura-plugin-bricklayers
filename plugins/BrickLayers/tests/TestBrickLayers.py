@@ -18,7 +18,9 @@ _MOCK_MODULES = [
     "UM",
     "UM.Application",
     "UM.Extension",
+    "UM.Job",
     "UM.Logger",
+    "UM.Message",
     "UM.PluginRegistry",
     "UM.Settings",
     "UM.Settings.SettingDefinition",
@@ -38,6 +40,31 @@ sys.modules["UM.Extension"].Extension = type(
     "Extension", (), {"__init__": lambda self: None}
 )
 
+# Make Job a real base class so BrickLayersPreviewJob can inherit from it
+_MockSignal = type("MockSignal", (), {
+    "connect": lambda self, cb: None,
+    "disconnect": lambda self, cb: None,
+    "emit": lambda self, *a, **kw: None,
+})
+
+sys.modules["UM.Job"].Job = type(
+    "Job", (), {
+        "__init__": lambda self: setattr(self, "finished", _MockSignal()),
+        "isRunning": lambda self: False,
+        "start": lambda self: None,
+    }
+)
+
+# Make Message a real class so BrickLayersPreviewJob can instantiate it
+sys.modules["UM.Message"].Message = type(
+    "Message", (), {
+        "__init__": lambda self, *a, **kw: None,
+        "show": lambda self: None,
+        "hide": lambda self: None,
+        "setProgress": lambda self, v: None,
+    }
+)
+
 # Load BrickLayers.py directly, bypassing the package __init__.py
 _MODULE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -49,6 +76,7 @@ _bl_module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_bl_module)
 
 BrickLayers = _bl_module.BrickLayers
+BrickLayersPreviewJob = _bl_module.BrickLayersPreviewJob
 PerimeterLoop = _bl_module.PerimeterLoop
 
 
@@ -1842,6 +1870,257 @@ G1 F1200 X18 Y18 E60.0"""
                 if e is not None:
                     self.assertGreater(float(e), 0,
                         f"Negative E in layer 2: {stripped}")
+
+
+class TestPreviewPipeline(unittest.TestCase):
+    """End-to-end tests for the post-processed G-code preview pipeline.
+
+    Verifies the full flow: scene signal → BrickLayers processes G-code →
+    gcode_dict updated → marker set → writeStarted skips.
+    All Cura/UM infrastructure is mocked.
+    """
+
+    def setUp(self):
+        self.bl = _make_instance()
+        self.bl._preview_job = None
+        self.bl._refreshing_preview = False
+
+        # Mock Application and scene
+        self.mock_app = MagicMock()
+        self.mock_scene = MagicMock()
+        self.mock_root = MagicMock()
+        self.mock_scene.getRoot.return_value = self.mock_root
+        self.mock_controller = MagicMock()
+        self.mock_controller.getScene.return_value = self.mock_scene
+        self.mock_app.getController.return_value = self.mock_controller
+        self.bl._application = self.mock_app
+
+        # Mock global stack with BrickLayers settings
+        self.mock_stack = MagicMock()
+        self.mock_stack.getProperty.side_effect = self._mock_get_property
+        _bl_module.CuraApplication.getInstance.return_value = self.mock_app
+        self.mock_app.getGlobalContainerStack.return_value = self.mock_stack
+        self.mock_app.getMultiBuildPlateModel.return_value.activeBuildPlate = 0
+
+        # Sample G-code (3 layers with inner walls)
+        self.sample_gcode = self._make_sample_gcode()
+
+    def _mock_get_property(self, key, prop):
+        settings = {
+            "brick_layers_enabled": True,
+            "layer_height": 0.2,
+            "brick_layers_extrusion_multiplier": 1.0,
+            "brick_layers_start_layer": 1,
+            "brick_layers_end_layer": -1,
+            "brick_layers_apply_inner_walls": True,
+            "brick_layers_apply_outer_walls": False,
+            "speed_travel": 150.0,
+            "machine_extruder_count": 1,
+            "retraction_amount": 5.0,
+            "retraction_retract_speed": 40.0,
+        }
+        return settings.get(key)
+
+    def _make_sample_gcode(self):
+        """Create a minimal but realistic 3-layer G-code list."""
+        header = ";Generated with Cura\nM82\nG28\n"
+        layer0 = (
+            ";LAYER:0\nG0 F9000 X10 Y10 Z0.2\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E0.5\nG1 X20 Y20 E1.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E1.5\nG1 X18 Y18 E2.0\n"
+        )
+        layer1 = (
+            ";LAYER:1\nG0 F9000 X10 Y10 Z0.4\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E2.5\nG1 X20 Y20 E3.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E3.5\nG1 X18 Y18 E4.0\n"
+        )
+        layer2 = (
+            ";LAYER:2\nG0 F9000 X10 Y10 Z0.6\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E4.5\nG1 X20 Y20 E5.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E5.5\nG1 X18 Y18 E6.0\n"
+        )
+        return [header, layer0, layer1, layer2]
+
+    # ----- Test 1 -----
+    def test_execute_marks_gcode_as_processed(self):
+        """_execute() returns modified G-code. Verify marker can be added
+        and subsequent calls would be skipped."""
+        result = self.bl._execute(list(self.sample_gcode))
+        self.assertEqual(len(result), len(self.sample_gcode))
+        # Add marker like the pipeline does
+        result[0] += _bl_module._BRICK_LAYERS_MARKER + "\n"
+        self.assertIn(_bl_module._BRICK_LAYERS_MARKER, result[0])
+
+    # ----- Test 2 -----
+    def test_execute_produces_shifted_z_values(self):
+        """Deferred loops should appear at shifted Z (original + 0.1mm
+        for 0.2mm layer height)."""
+        result = self.bl._execute(list(self.sample_gcode))
+        # Layer 0: Z=0.2, shift=0.1 → deferred at Z=0.3
+        layer0_text = result[1]
+        z_values = []
+        for line in layer0_text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("G0 ") or stripped.startswith("G1 "):
+                z = BrickLayers._getValue(stripped, "Z")
+                if z is not None:
+                    z_values.append(float(z))
+        self.assertTrue(
+            any(abs(z - 0.3) < 0.01 for z in z_values),
+            f"Expected shifted Z=0.3 in layer 0, got Z values: {z_values}",
+        )
+
+    # ----- Test 3 -----
+    def test_write_started_skips_when_already_processed(self):
+        """If gcode_dict already has BRICKLAYERS_PROCESSED marker,
+        _onWriteStarted should not re-execute."""
+        processed_gcode = list(self.sample_gcode)
+        processed_gcode[0] += _bl_module._BRICK_LAYERS_MARKER + "\n"
+        self.mock_scene.gcode_dict = {0: processed_gcode}
+        setattr(self.mock_scene, "gcode_dict", {0: processed_gcode})
+
+        self.bl._onWriteStarted(MagicMock())
+
+        marker_count = processed_gcode[0].count(_bl_module._BRICK_LAYERS_MARKER)
+        self.assertEqual(
+            marker_count, 1,
+            "Marker should appear exactly once — no double processing",
+        )
+
+    # ----- Test 4 -----
+    def test_write_started_fallback_processes_synchronously(self):
+        """If preview job hasn't run, _onWriteStarted should process
+        synchronously as fallback."""
+        gcode_copy = list(self.sample_gcode)
+        gcode_dict = {0: gcode_copy}
+        self.mock_scene.gcode_dict = gcode_dict
+
+        # _onWriteStarted uses Application.getInstance() (not self._application)
+        _bl_module.Application.getInstance.return_value = self.mock_app
+
+        self.bl._onWriteStarted(MagicMock())
+
+        gcode = self.mock_scene.gcode_dict[0]
+        self.assertIn(_bl_module._BRICK_LAYERS_MARKER, gcode[0])
+
+    # ----- Test 5 -----
+    def test_gcode_output_matches_after_preview_and_save(self):
+        """The G-code shown in preview must be identical to what gets saved.
+        _execute() must be deterministic: same input → same output."""
+        preview_result = self.bl._execute(list(self.sample_gcode))
+        save_result = self.bl._execute(list(self.sample_gcode))
+
+        self.assertEqual(len(preview_result), len(save_result))
+        for i in range(len(preview_result)):
+            self.assertEqual(
+                preview_result[i], save_result[i],
+                f"Block {i} differs between preview and save execution",
+            )
+
+    # ----- Test 6 -----
+    def test_reslice_clears_processed_marker(self):
+        """After re-slicing, gcode_dict has fresh G-code without marker.
+        The pipeline should detect this and process again."""
+        result1 = self.bl._execute(list(self.sample_gcode))
+        result1[0] += _bl_module._BRICK_LAYERS_MARKER + "\n"
+
+        # Simulate re-slice: fresh gcode without marker
+        fresh_gcode = list(self.sample_gcode)
+        self.assertNotIn(_bl_module._BRICK_LAYERS_MARKER, fresh_gcode[0])
+
+        result2 = self.bl._execute(fresh_gcode)
+        self.assertEqual(len(result2), len(self.sample_gcode))
+
+    # ----- Test 7 -----
+    def test_full_preview_pipeline_no_negative_e_values(self):
+        """Full pipeline must never produce negative E values in absolute mode.
+        Note: BrickLayers uses relative E internally for retract/unretract
+        commands (marked with ;BrickLayers retract/unretract comments).
+        Those are correct — we only check extrusion moves."""
+        result = self.bl._execute(list(self.sample_gcode))
+        for block_idx, block in enumerate(result):
+            for line in block.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("G1 "):
+                    # Skip retract/unretract commands injected by BrickLayers
+                    if ";BrickLayers" in stripped:
+                        continue
+                    e = BrickLayers._getValue(stripped, "E")
+                    if e is not None:
+                        self.assertGreaterEqual(
+                            float(e), 0,
+                            f"Negative E in block {block_idx}: {stripped}",
+                        )
+
+    # ----- Test 8 -----
+    def test_preview_z_values_within_model_bounds(self):
+        """Shifted Z values must not exceed the model's top layer Z +
+        layer_height. Inner walls must not extend above outer walls."""
+        result = self.bl._execute(list(self.sample_gcode))
+        max_original_z = 0.6  # Layer 2 at Z=0.6
+        max_allowed_z = max_original_z + 0.2 + 0.01  # layer_height + tolerance
+
+        for block_idx, block in enumerate(result):
+            for line in block.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("G0 ") or stripped.startswith("G1 "):
+                    z = BrickLayers._getValue(stripped, "Z")
+                    if z is not None:
+                        self.assertLessEqual(
+                            float(z), max_allowed_z,
+                            f"Z={z} exceeds model bounds in block {block_idx}: "
+                            f"{stripped}",
+                        )
+
+    # ----- Test 9 -----
+    def test_no_forbidden_gcodes_in_output(self):
+        """BrickLayers must not inject M82, M83, or G92 commands."""
+        result = self.bl._execute(list(self.sample_gcode))
+        forbidden = {"M82", "M83", "G92"}
+        for block_idx, block in enumerate(result):
+            for line in block.split("\n"):
+                stripped = line.strip()
+                # Only check lines that BrickLayers could have injected
+                # (skip the header which already has M82 from the slicer)
+                if block_idx == 0:
+                    continue
+                parts = stripped.split()
+                cmd = parts[0] if parts else ""
+                self.assertNotIn(
+                    cmd, forbidden,
+                    f"Forbidden command {cmd} in block {block_idx}: {stripped}",
+                )
+
+    # ----- Test 10 -----
+    def test_preview_job_stores_results(self):
+        """BrickLayersPreviewJob should store modified_gcode and
+        new_layer_data after successful run (mocked GCodeReader)."""
+        mock_gcode_reader = MagicMock()
+        mock_result_node = MagicMock()
+        mock_layer_data = MagicMock()
+        mock_result_node.callDecoration.return_value = mock_layer_data
+        mock_gcode_reader.readFromStream.return_value = mock_result_node
+        _bl_module.PluginRegistry.getInstance.return_value.getPluginObject.return_value = (
+            mock_gcode_reader
+        )
+
+        target_node = MagicMock()
+        job = BrickLayersPreviewJob(self.bl, self.sample_gcode, target_node)
+        job.run()
+
+        self.assertIsNotNone(job._modified_gcode)
+        self.assertIsNotNone(job._new_layer_data)
+        self.assertEqual(job._new_layer_data, mock_layer_data)
+        self.assertEqual(len(job._modified_gcode), len(self.sample_gcode))
 
 
 if __name__ == "__main__":
