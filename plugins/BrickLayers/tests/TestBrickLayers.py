@@ -469,12 +469,13 @@ class TestProcessLayer(unittest.TestCase):
     def _run(self, layer_gcode=SAMPLE_LAYER, layer_num=5, z_shift=0.15,
              extrusion_multiplier=1.0, is_first=False, is_last=False,
              target_types=None, relative=True):
-        return self.bl._process_layer(
+        result, _end_e = self.bl._process_layer(
             layer_gcode, layer_num, z_shift,
             extrusion_multiplier, is_first, is_last,
             target_types or self.target_types, relative,
             self.retract_length, self.retract_speed, self.travel_speed
         )
+        return result
 
     def test_relative_basic_3_loops(self):
         """3 inner wall loops: loop 0 stays, loop 1 deferred, loop 2 stays."""
@@ -755,7 +756,7 @@ class TestEndToEnd(unittest.TestCase):
             is_first = (layer_num == start_layer_gcode)
             is_last = (layer_num == end_layer_gcode)
 
-            result = self.bl._process_layer(
+            result, _end_e = self.bl._process_layer(
                 block, layer_num, z_shift, extrusion_multiplier,
                 is_first, is_last, target_types, relative_extrusion,
                 retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
@@ -890,7 +891,7 @@ G1 F1200 X60 Y60 E10.0
 G1 F1200 X50 Y60 E11.0
 G1 F1200 X50 Y50 E12.0"""
 
-        result = self.bl._process_layer(
+        result, _end_e = self.bl._process_layer(
             abs_layer, 0, z_shift=0.1, extrusion_multiplier=1.05,
             is_first_brick=False, is_last_brick=False,
             target_types={"WALL-INNER"}, relative_extrusion=False,
@@ -959,12 +960,12 @@ G1 F1200 X40 Y40 E103.0
 G1 F1200 X30 Y40 E103.5
 G1 F1200 X30 Y30 E104.0"""
 
-        result = self.bl._process_layer(
+        result, _end_e = self.bl._process_layer(
             layer, 0, z_shift=0.15, extrusion_multiplier=1.0,
             is_first_brick=False, is_last_brick=False,
             target_types={"WALL-INNER"}, relative_extrusion=False,
             retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
-            layer_start_e=100.0
+            layer_start_e=100.0, output_start_e=100.0
         )
         self.assertIsNotNone(result)
         lines = result.split("\n")
@@ -1002,12 +1003,12 @@ G1 F1200 X40 Y40 E103.0
 G1 F1200 X30 Y40 E103.5
 G1 F1200 X30 Y30 E104.0"""
 
-        result = self.bl._process_layer(
+        result, _end_e = self.bl._process_layer(
             layer, 0, z_shift=0.15, extrusion_multiplier=1.0,
             is_first_brick=False, is_last_brick=False,
             target_types={"WALL-INNER"}, relative_extrusion=False,
             retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
-            layer_start_e=100.0
+            layer_start_e=100.0, output_start_e=100.0
         )
         self.assertIsNotNone(result)
         # No M83/M82/G92 should be present
@@ -1055,12 +1056,12 @@ G1 F1200 X50 Y50 E1106.0
 ;TYPE:FILL
 G1 F1200 X25 Y25 E1106.5"""
 
-        result = self.bl._process_layer(
+        result, _end_e = self.bl._process_layer(
             layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
             is_first_brick=False, is_last_brick=False,
             target_types={"WALL-INNER"}, relative_extrusion=False,
             retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
-            layer_start_e=1100.0
+            layer_start_e=1100.0, output_start_e=1100.0
         )
         self.assertIsNotNone(result)
 
@@ -1102,7 +1103,7 @@ G1 F1200 X40 Y40 E0.5
 G1 F1200 X30 Y40 E0.5
 G1 F1200 X30 Y30 E0.5"""
 
-        result = self.bl._process_layer(
+        result, _end_e = self.bl._process_layer(
             layer, 0, z_shift=0.15, extrusion_multiplier=1.0,
             is_first_brick=False, is_last_brick=False,
             target_types={"WALL-INNER"}, relative_extrusion=True,
@@ -1112,6 +1113,124 @@ G1 F1200 X30 Y30 E0.5"""
         self.assertNotIn("M83", result)
         self.assertNotIn("M82", result)
         self.assertNotIn("G92", result)
+
+    def test_absolute_retract_values_are_correct(self):
+        """BrickLayers retract/unretract in absolute mode should use proper
+        absolute E positions, NOT hardcoded relative values like E-10."""
+        layer = """;LAYER:5
+G0 F9000 X10 Y10 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E50.5
+G1 F1200 X20 Y20 E51.0
+G1 F1200 X10 Y20 E51.5
+G1 F1200 X10 Y10 E52.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E52.5
+G1 F1200 X40 Y40 E53.0
+G1 F1200 X30 Y40 E53.5
+G1 F1200 X30 Y30 E54.0"""
+
+        result, end_e = self.bl._process_layer(
+            layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=50.0, output_start_e=50.0
+        )
+        self.assertIsNotNone(result)
+        lines = result.split("\n")
+
+        # Check that NO E value is negative (impossible in absolute mode
+        # starting from E=50)
+        for line in lines:
+            s = line.strip()
+            if s.startswith("G1 "):
+                e = BrickLayers._getValue(s, "E")
+                if e is not None:
+                    self.assertGreaterEqual(e, 0.0,
+                        f"Negative E in absolute mode: {line}")
+
+        # Check retract lines specifically: E should be current_pos - 5,
+        # NOT a hardcoded -5 or -10
+        retract_lines = [l for l in lines if "BrickLayers retract" in l]
+        for rl in retract_lines:
+            e = BrickLayers._getValue(rl.strip(), "E")
+            self.assertIsNotNone(e, f"Retract line missing E value: {rl}")
+            self.assertGreater(e, 0.0,
+                f"Retract E should be positive absolute value, got {e}: {rl}")
+
+    def test_cross_layer_e_continuity(self):
+        """When processing multiple layers in absolute mode, E values should
+        be continuous across layer boundaries."""
+        layer_template = """;LAYER:{num}
+G0 F9000 X10 Y10 Z{z}
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E{e1}
+G1 F1200 X20 Y20 E{e2}
+G1 F1200 X10 Y20 E{e3}
+G1 F1200 X10 Y10 E{e4}
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E{e5}
+G1 F1200 X40 Y40 E{e6}
+G1 F1200 X30 Y40 E{e7}
+G1 F1200 X30 Y30 E{e8}"""
+
+        # Simulate two consecutive layers
+        layer1 = layer_template.format(
+            num=2, z=0.6, e1=10.5, e2=11.0, e3=11.5, e4=12.0,
+            e5=12.5, e6=13.0, e7=13.5, e8=14.0)
+        layer2 = layer_template.format(
+            num=3, z=0.8, e1=14.5, e2=15.0, e3=15.5, e4=16.0,
+            e5=16.5, e6=17.0, e7=17.5, e8=18.0)
+
+        # Process layer 1
+        result1, end_e1 = self.bl._process_layer(
+            layer1, 2, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=True, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=10.0, output_start_e=10.0
+        )
+        self.assertIsNotNone(result1)
+
+        # Process layer 2, using end_e1 as output_start_e
+        result2, end_e2 = self.bl._process_layer(
+            layer2, 3, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=True,
+            target_types={"WALL-INNER"}, relative_extrusion=False,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
+            layer_start_e=14.0, output_start_e=end_e1
+        )
+        self.assertIsNotNone(result2)
+
+        # The first E in layer 2's output should be close to end_e1
+        # (within a retract/unretract difference)
+        last_e_layer1 = None
+        for line in result1.split("\n"):
+            s = line.strip()
+            if s.startswith("G1 "):
+                e = BrickLayers._getValue(s, "E")
+                if e is not None:
+                    last_e_layer1 = e
+
+        first_e_layer2 = None
+        for line in result2.split("\n"):
+            s = line.strip()
+            if s.startswith("G1 "):
+                e = BrickLayers._getValue(s, "E")
+                if e is not None:
+                    first_e_layer2 = e
+                    break
+
+        self.assertIsNotNone(last_e_layer1)
+        self.assertIsNotNone(first_e_layer2)
+        # The jump between last E of layer 1 and first E of layer 2
+        # should be small (not a huge discontinuity)
+        jump = abs(first_e_layer2 - last_e_layer1)
+        self.assertLess(jump, 10.0,
+            f"E jump between layers too large: {last_e_layer1} -> {first_e_layer2}")
 
 
 if __name__ == "__main__":

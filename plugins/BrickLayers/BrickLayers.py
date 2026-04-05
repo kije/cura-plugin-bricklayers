@@ -330,9 +330,15 @@ class BrickLayers(Extension):
         start_layer_gcode = start_layer - 1
         layers_modified = 0
 
-        # For absolute extrusion mode: track E position across layers so we
-        # can convert each processed layer to relative E and back.
-        layer_start_e = 0.0
+        # For absolute extrusion mode: track TWO E positions across layers:
+        # - original_e: tracks slicer's original E values (for converting
+        #   input layers from absolute to relative)
+        # - output_e: tracks actual output E values (for converting
+        #   processed output from relative back to absolute)
+        # These diverge when the extrusion multiplier != 1.0 or when
+        # extra retracts/unretracts are added by BrickLayers.
+        original_e = 0.0
+        output_e = 0.0
         if not relative_extrusion:
             # Scan data blocks before the first processable layer to find
             # the E position at the start of processing.
@@ -345,7 +351,8 @@ class BrickLayers(Extension):
                     if stripped.startswith("G1 "):
                         e = self._getValue(stripped, "E")
                         if e is not None:
-                            layer_start_e = float(e)
+                            original_e = float(e)
+            output_e = original_e
 
         for index in range(len(data)):
             layer_gcode = data[index]
@@ -359,7 +366,8 @@ class BrickLayers(Extension):
                         if stripped.startswith("G1 "):
                             e = self._getValue(stripped, "E")
                             if e is not None:
-                                layer_start_e = float(e)
+                                original_e = float(e)
+                                output_e = float(e)
                 continue
             if layer_num < start_layer_gcode or layer_num > end_layer_gcode:
                 # Non-processed layer: track E for absolute mode
@@ -369,11 +377,12 @@ class BrickLayers(Extension):
                         if stripped.startswith("G1 "):
                             e = self._getValue(stripped, "E")
                             if e is not None:
-                                layer_start_e = float(e)
+                                original_e = float(e)
+                                output_e = float(e)
                 continue
 
             # For absolute mode: find the original end E BEFORE modifying
-            original_layer_end_e = layer_start_e
+            original_layer_end_e = original_e
             if not relative_extrusion:
                 for line in layer_gcode.split("\n"):
                     stripped = line.strip()
@@ -385,22 +394,22 @@ class BrickLayers(Extension):
             is_first_brick = (layer_num == start_layer_gcode)
             is_last_brick = (layer_num == end_layer_gcode)
 
-            new_layer = self._process_layer(
+            new_layer, actual_end_e = self._process_layer(
                 layer_gcode, layer_num, z_shift,
                 extrusion_multiplier, is_first_brick, is_last_brick,
                 target_types, relative_extrusion,
                 retract_length, retract_speed, travel_speed,
-                layer_start_e
+                original_e, output_e
             )
 
             if new_layer is not None:
                 data[index] = new_layer
                 layers_modified += 1
 
-            # Update layer_start_e from ORIGINAL values (not modified)
-            # so subsequent layers' absolute E values remain in sync.
+            # Update E tracking for the next layer
             if not relative_extrusion:
-                layer_start_e = original_layer_end_e
+                original_e = original_layer_end_e
+                output_e = actual_end_e
 
         Logger.log("d", "BrickLayers: Modified %d layers (layers %d-%d, z_shift=%.3fmm)",
                    layers_modified, start_layer_gcode, end_layer_gcode, z_shift)
@@ -558,7 +567,9 @@ class BrickLayers(Extension):
                        relative_extrusion: bool,
                        retract_length: float, retract_speed: float,
                        travel_speed: float,
-                       layer_start_e: float = 0.0) -> Optional[str]:
+                       layer_start_e: float = 0.0,
+                       output_start_e: float = 0.0
+                       ) -> Tuple[Optional[str], float]:
 
         # For absolute extrusion mode: convert the entire layer to relative E
         # BEFORE processing. This makes loop reordering safe since each E
@@ -583,7 +594,7 @@ class BrickLayers(Extension):
                     break
 
         if current_z is None:
-            return None
+            return None, output_start_e
 
         shifted_z = round(current_z + z_shift, 4)
 
@@ -686,7 +697,7 @@ class BrickLayers(Extension):
 
         has_loops = any(s[0] == "loops" for s in sections)
         if not has_loops:
-            return None
+            return None, output_start_e
 
         # H1 fix: use conservative multipliers for first/last brick layers
         if is_first_brick:
@@ -725,7 +736,7 @@ class BrickLayers(Extension):
                     loop_counter += 1
 
         if not all_deferred:
-            return None
+            return None, output_start_e
 
         is_retracted = self._check_retracted_state(output_lines, effective_relative)
 
@@ -797,10 +808,14 @@ class BrickLayers(Extension):
 
         # For absolute mode: convert relative E values back to absolute
         # so the output uses only G0/G1 commands (no M82/M83/G92 needed).
+        # Use output_start_e (actual E from previous output) not layer_start_e
+        # (original slicer E) so E values are continuous across layers.
         if not relative_extrusion:
-            output_lines = self._convert_to_absolute_e(output_lines, layer_start_e)
+            output_lines, actual_end_e = self._convert_to_absolute_e(
+                output_lines, output_start_e)
+            return "\n".join(output_lines), actual_end_e
 
-        return "\n".join(output_lines)
+        return "\n".join(output_lines), output_start_e
 
     def _check_retracted_state(self, lines: List[str],
                                 relative_extrusion: bool) -> bool:
@@ -858,6 +873,8 @@ class BrickLayers(Extension):
         Takes output lines with relative E and returns lines with absolute E,
         starting from start_e. This avoids needing M83/M82/G92 commands which
         some firmware (e.g. Ultimaker S5) does not support.
+
+        Returns (converted_lines, final_e_position).
         """
         result = []
         current_e = start_e
@@ -872,7 +889,7 @@ class BrickLayers(Extension):
                     continue
             result.append(line)
 
-        return result
+        return result, current_e
 
     @staticmethod
     def _strip_z_from_body(lines: List[str], shifted_z: float) -> List[str]:
