@@ -311,7 +311,7 @@ class BrickLayers(Extension):
             return data
 
         relative_extrusion, retract_length, retract_speed = \
-            self._detect_gcode_params(data)
+            self._detect_gcode_params(data, global_stack)
 
         # M5 fix: use Cura's travel speed setting instead of heuristic detection
         travel_speed_mm_s = global_stack.getProperty("speed_travel", "value")
@@ -468,35 +468,47 @@ class BrickLayers(Extension):
     # GCode analysis
     # ------------------------------------------------------------------ #
 
-    def _detect_gcode_params(self, data: List[str]
+    def _detect_gcode_params(self, data: List[str],
+                              global_stack=None
                               ) -> Tuple[bool, float, float]:
-        """Detect extrusion mode and retraction parameters from G-code header.
+        """Detect extrusion mode and retraction parameters.
+
+        Queries Cura settings first (authoritative), falls back to G-code
+        scanning. Griffin-flavor G-code (Ultimaker S5) does NOT emit M82/M83
+        so we cannot rely on G-code scanning alone.
 
         Returns (relative_extrusion, retract_length, retract_speed).
         """
-        relative_extrusion = True
+        # Query Cura settings first — authoritative source
+        if global_stack is not None:
+            rel_ext_setting = global_stack.getProperty(
+                "relative_extrusion", "value")
+            if rel_ext_setting is not None:
+                relative_extrusion = bool(rel_ext_setting)
+            else:
+                relative_extrusion = False  # absolute is safer default
+        else:
+            relative_extrusion = False  # absolute is safer default
+
+        # Query retraction settings from Cura
         retract_length = 5.0
         retract_speed = 2400.0
-        retract_detected = False
+        if global_stack is not None:
+            rl = global_stack.getProperty("retraction_amount", "value")
+            if rl is not None:
+                retract_length = float(rl)
+            rs = global_stack.getProperty("retraction_retract_speed", "value")
+            if rs is not None:
+                retract_speed = float(rs) * 60.0  # mm/s to mm/min
 
+        # Still scan G-code for M82/M83 to override if explicitly present
         for block in data[:min(6, len(data))]:
             for line in block.split("\n"):
                 stripped = line.strip()
-                if stripped == "M83":
+                if stripped == "M83" or stripped.startswith("M83 "):
                     relative_extrusion = True
-                elif stripped == "M82":
+                elif stripped == "M82" or stripped.startswith("M82 "):
                     relative_extrusion = False
-                elif not retract_detected and stripped.startswith("G1 "):
-                    e_val = self._getValue(stripped, "E")
-                    f_val = self._getValue(stripped, "F")
-                    x_val = self._getValue(stripped, "X")
-                    y_val = self._getValue(stripped, "Y")
-                    if e_val is not None and x_val is None and y_val is None:
-                        if relative_extrusion and e_val < 0:
-                            retract_length = abs(e_val)
-                            if f_val is not None:
-                                retract_speed = f_val
-                            retract_detected = True
 
         return relative_extrusion, retract_length, retract_speed
 
@@ -740,6 +752,23 @@ class BrickLayers(Extension):
 
         is_retracted = self._check_retracted_state(output_lines, effective_relative)
 
+        # Track XY position before deferred section so we can restore it after
+        pre_deferred_x = None
+        pre_deferred_y = None
+        for line in reversed(output_lines):
+            stripped = line.strip()
+            if stripped.startswith("G0 ") or stripped.startswith("G1 "):
+                if pre_deferred_x is None:
+                    x = self._getValue(stripped, "X")
+                    if x is not None:
+                        pre_deferred_x = x
+                if pre_deferred_y is None:
+                    y = self._getValue(stripped, "Y")
+                    if y is not None:
+                        pre_deferred_y = y
+                if pre_deferred_x is not None and pre_deferred_y is not None:
+                    break
+
         output_lines.append(
             ";BrickLayers: shifted loops at Z=%.4f (offset +%.3f)" % (shifted_z, z_shift))
 
@@ -800,6 +829,17 @@ class BrickLayers(Extension):
         output_lines.append(";BrickLayers: restoring Z=%.4f" % current_z)
         output_lines.append(
             "G0 F%.0f Z%.4f ;BrickLayers Z-restore" % (travel_speed, current_z))
+
+        # Restore XY position to where nozzle was before deferred section
+        # (while still retracted, so no filament ooze during travel)
+        if pre_deferred_x is not None or pre_deferred_y is not None:
+            travel_parts = ["G0", "F%.0f" % travel_speed]
+            if pre_deferred_x is not None:
+                travel_parts.append("X%.3f" % pre_deferred_x)
+            if pre_deferred_y is not None:
+                travel_parts.append("Y%.3f" % pre_deferred_y)
+            output_lines.append(
+                " ".join(travel_parts) + " ;BrickLayers XY-restore")
 
         # C3 fix: unretract after Z-restore so subsequent G-code finds
         # the nozzle in the expected primed state
@@ -867,7 +907,7 @@ class BrickLayers(Extension):
         return "\n".join(result), original_end_e
 
     def _convert_to_absolute_e(self, lines: List[str],
-                                start_e: float) -> List[str]:
+                                start_e: float) -> Tuple[List[str], float]:
         """Convert relative E values back to absolute by accumulating deltas.
 
         Takes output lines with relative E and returns lines with absolute E,

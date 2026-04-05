@@ -417,19 +417,49 @@ class TestDetectGcodeParams(unittest.TestCase):
         rel, _, _ = self.bl._detect_gcode_params(data)
         self.assertFalse(rel)
 
-    def test_detects_retraction_params(self):
+    def test_detects_retraction_params_from_gcode(self):
+        """When no global_stack, retraction params come from defaults."""
         data = ["M83\nG1 F2400 E-6.5\n"]
         rel, length, speed = self.bl._detect_gcode_params(data)
+        self.assertTrue(rel)
+        # Without global_stack, retract params come from defaults
+        self.assertAlmostEqual(length, 5.0)
+
+    def test_detects_retraction_from_settings(self):
+        """With global_stack, retraction params come from Cura settings."""
+        mock_stack = MagicMock()
+        mock_stack.getProperty.side_effect = lambda key, _: {
+            "relative_extrusion": True,
+            "retraction_amount": 6.5,
+            "retraction_retract_speed": 40.0,  # mm/s
+        }.get(key)
+        data = ["G28\n"]
+        rel, length, speed = self.bl._detect_gcode_params(data, mock_stack)
+        self.assertTrue(rel)
         self.assertAlmostEqual(length, 6.5)
-        self.assertAlmostEqual(speed, 2400.0)
+        self.assertAlmostEqual(speed, 2400.0)  # 40 mm/s * 60
 
     def test_defaults_when_nothing_detected(self):
         data = ["G28\n"]
         rel, length, speed = self.bl._detect_gcode_params(data)
-        # Defaults
-        self.assertTrue(rel)  # default is relative
+        # Default is absolute (safer for firmware like Ultimaker S5
+        # that doesn't emit M82/M83)
+        self.assertFalse(rel)
         self.assertAlmostEqual(length, 5.0)
         self.assertAlmostEqual(speed, 2400.0)
+
+    def test_detects_m82_with_comment(self):
+        """Griffin-flavor G-code has 'M82 ;absolute extrusion mode'."""
+        data = ["M82 ;absolute extrusion mode\n"]
+        rel, _, _ = self.bl._detect_gcode_params(data)
+        self.assertFalse(rel)
+
+    def test_griffin_no_m82_m83_defaults_absolute(self):
+        """Griffin firmware doesn't emit M82/M83. Default should be absolute."""
+        data = [";START_OF_HEADER\n;FLAVOR:Griffin\n;END_OF_HEADER\n",
+                "T0\nG92 E0\nG0 Z20\nG1 F2700 E-10\n"]
+        rel, _, _ = self.bl._detect_gcode_params(data)
+        self.assertFalse(rel)
 
 
 # =========================================================================
@@ -527,8 +557,19 @@ G1 F1200 X100 Y90 E0.5"""
                 z_restore_idx = i
                 break
         self.assertIsNotNone(z_restore_idx)
-        # Next line should be unretract
-        self.assertIn(";BrickLayers unretract", lines[z_restore_idx + 1])
+        # After Z-restore: XY-restore (optional), then unretract
+        remaining = lines[z_restore_idx + 1:]
+        # Find the unretract within the next few lines
+        unretract_found = False
+        xy_restore_found = False
+        for line in remaining[:3]:
+            if ";BrickLayers XY-restore" in line:
+                xy_restore_found = True
+            if ";BrickLayers unretract" in line:
+                unretract_found = True
+                break
+        self.assertTrue(unretract_found, "Unretract should follow Z-restore")
+        self.assertTrue(xy_restore_found, "XY-restore should be between Z-restore and unretract")
 
     def test_absolute_mode(self):
         """Absolute mode should also produce valid output with retractions."""
