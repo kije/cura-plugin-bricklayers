@@ -407,6 +407,15 @@ class BrickLayers(Extension):
             is_first_brick = (layer_num == start_layer_gcode)
             is_last_brick = (layer_num == end_layer_gcode)
 
+            # Check if the NEXT layer has target wall sections.
+            # If not, we're at a model boundary (slope/edge/top) and
+            # shifting loops up would extend walls beyond the model.
+            if not is_last_brick:
+                next_has_walls = self._next_layer_has_walls(
+                    data, index, target_types)
+                if not next_has_walls:
+                    is_last_brick = True
+
             new_layer, actual_end_e = self._process_layer(
                 layer_gcode, layer_num, z_shift,
                 extrusion_multiplier, is_first_brick, is_last_brick,
@@ -767,6 +776,9 @@ class BrickLayers(Extension):
                 # H3 fix: reset loop counter per wall section
                 loop_counter = 0
                 last_section_deferred_last = False
+                # Track whether we've skipped any loops since last emit,
+                # to detect within-section position discontinuities
+                skipped_since_last_emit = False
 
                 for loop in loops:
                     if not loop.has_extrusion:
@@ -778,12 +790,29 @@ class BrickLayers(Extension):
                     # There's no layer above to interlock with, and shifting
                     # loops up causes inner walls to extend above the model.
                     if is_last_brick or loop_counter % 2 == 0:
+                        # Fix within-section position continuity: if we
+                        # skipped loops and this loop's prefix lacks a G0
+                        # travel, the nozzle is at the wrong position.
+                        if skipped_since_last_emit:
+                            if not self._prefix_has_travel(loop.prefix_lines):
+                                tx = loop.travel_x if loop.travel_x is not None else loop.start_x
+                                ty = loop.travel_y if loop.travel_y is not None else loop.start_y
+                                if tx is not None or ty is not None:
+                                    parts = ["G0", "F%.0f" % travel_speed]
+                                    if tx is not None:
+                                        parts.append("X%.3f" % tx)
+                                    if ty is not None:
+                                        parts.append("Y%.3f" % ty)
+                                    output_lines.append(
+                                        " ".join(parts) + " ;BrickLayers position-fix")
+                            skipped_since_last_emit = False
                         output_lines.extend(loop.prefix_lines)
                         output_lines.extend(loop.body_lines)
                         last_section_deferred_last = False
                     else:
                         all_deferred.append((loop, section_wall_type))
                         last_section_deferred_last = True
+                        skipped_since_last_emit = True
                     loop_counter += 1
 
         if not all_deferred:
@@ -980,6 +1009,40 @@ class BrickLayers(Extension):
             travel_line = " ".join(travel_parts) + " ;BrickLayers position-fix"
             lines.insert(insert_pos, travel_line)
             data[next_index] = "\n".join(lines)
+
+    def _next_layer_has_walls(self, data: List[str], current_index: int,
+                               target_types: set) -> bool:
+        """Check if the next layer data block contains target wall sections.
+
+        If the next layer has no wall sections matching target_types, we're
+        at a model boundary (slope/edge/top). Shifting loops up would
+        extend walls above the model surface.
+        """
+        for i in range(current_index + 1, min(current_index + 3, len(data))):
+            block = data[i]
+            layer_num = self._get_layer_number(block)
+            if layer_num is None:
+                continue
+            # Found the next layer block — check for target wall TYPE markers
+            for line in block.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";TYPE:"):
+                    wall_type = stripped[6:]
+                    if wall_type in target_types:
+                        return True
+            return False
+        return False
+
+    def _prefix_has_travel(self, prefix_lines: List[str]) -> bool:
+        """Check if a loop's prefix lines contain a G0 with X or Y."""
+        for line in prefix_lines:
+            stripped = line.strip()
+            if stripped.startswith("G0 "):
+                x = self._getValue(stripped, "X")
+                y = self._getValue(stripped, "Y")
+                if x is not None or y is not None:
+                    return True
+        return False
 
     def _fix_section_position(self, output_lines: List[str],
                                section_lines: List[str],

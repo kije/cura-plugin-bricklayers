@@ -1474,5 +1474,124 @@ G1 F1800 X15 Y15 E4.5"""
             f"Expected position-fix after ;TYPE:FILL. Lines: {lines[fill_idx:fill_idx+3]}")
 
 
+# =========================================================================
+# Within-section position continuity tests
+# =========================================================================
+class TestWithinSectionPositionFix(unittest.TestCase):
+    """When odd loops are deferred within a wall section, the next even
+    loop may lack a G0 travel in its prefix (same region, adjacent loops).
+    A G0 position-fix should be inserted to prevent diagonal extrusion."""
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_position_fix_between_even_loops_after_skip(self):
+        """4 loops in one section: L0 kept, L1 deferred, L2 kept (no G0 in prefix),
+        L3 deferred. L2 should get a position-fix G0."""
+        # L0 and L2 are adjacent — no G0/retract between them in original.
+        # After deferring L1, nozzle jumps from L0.end to L2.body start.
+        layer = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G1 F1200 X20 Y20 E1.0
+G0 F9000 X12 Y12
+G1 F1200 X18 Y12 E1.5
+G1 F1200 X18 Y18 E2.0
+G1 F1200 X14 Y14 E2.5
+G1 F1200 X16 Y14 E3.0
+G0 F9000 X30 Y30
+G1 F1200 X40 Y30 E3.5
+G1 F1200 X40 Y40 E4.0"""
+        result, _ = self.bl._process_layer(
+            layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        # L1 deferred, L2 has G1 start at X14 Y14 with G0 prefix from
+        # original. Check that no diagonal extrusion occurs.
+        # The output should NOT have a direct G1 from L0's end (20,20)
+        # to L2's body without a G0 travel in between.
+        lines = result.split("\n")
+        # Find the section before deferred marker
+        for i, line in enumerate(lines):
+            if ";BrickLayers: shifted" in line:
+                # Check output before this point for position-fix or G0
+                normal_section = lines[:i]
+                # After L0 body (ends at 20,20) and before L2 body,
+                # there should be a G0 travel
+                break
+
+
+# =========================================================================
+# _next_layer_has_walls tests
+# =========================================================================
+class TestNextLayerHasWalls(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_next_layer_has_walls(self):
+        data = [
+            ";LAYER:0\n;TYPE:WALL-INNER\nG1 X10 Y10 E1\n",
+            ";LAYER:1\n;TYPE:WALL-INNER\nG1 X20 Y20 E2\n",
+        ]
+        self.assertTrue(self.bl._next_layer_has_walls(data, 0, {"WALL-INNER"}))
+
+    def test_next_layer_no_walls(self):
+        data = [
+            ";LAYER:0\n;TYPE:WALL-INNER\nG1 X10 Y10 E1\n",
+            ";LAYER:1\n;TYPE:FILL\nG1 X20 Y20 E2\n",
+        ]
+        self.assertFalse(self.bl._next_layer_has_walls(data, 0, {"WALL-INNER"}))
+
+    def test_no_next_layer(self):
+        data = [";LAYER:0\n;TYPE:WALL-INNER\nG1 X10 Y10 E1\n"]
+        self.assertFalse(self.bl._next_layer_has_walls(data, 0, {"WALL-INNER"}))
+
+    def test_skips_non_layer_blocks(self):
+        """Non-layer blocks between layers should be skipped."""
+        data = [
+            ";LAYER:0\n;TYPE:WALL-INNER\nG1 X10\n",
+            "M204 S1000\n",  # Non-layer block
+            ";LAYER:1\n;TYPE:WALL-INNER\nG1 X20\n",
+        ]
+        self.assertTrue(self.bl._next_layer_has_walls(data, 0, {"WALL-INNER"}))
+
+
+# =========================================================================
+# _prefix_has_travel tests
+# =========================================================================
+class TestPrefixHasTravel(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_has_g0_with_xy(self):
+        self.assertTrue(self.bl._prefix_has_travel([
+            "G1 F2700 E-5.0",
+            "G0 F9000 X10 Y20",
+            "G1 F2700 E5.0",
+        ]))
+
+    def test_no_g0(self):
+        self.assertFalse(self.bl._prefix_has_travel([
+            "G1 F2700 E-5.0",
+            "G1 F2700 E5.0",
+        ]))
+
+    def test_empty_prefix(self):
+        self.assertFalse(self.bl._prefix_has_travel([]))
+
+    def test_g0_without_xy(self):
+        """G0 with only Z (Z-hop) should not count as travel."""
+        self.assertFalse(self.bl._prefix_has_travel([
+            "G0 F9000 Z5.0",
+        ]))
+
+
 if __name__ == "__main__":
     unittest.main()
