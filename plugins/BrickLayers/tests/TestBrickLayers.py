@@ -631,25 +631,12 @@ G1 F1200 X60 Y60 E6.0"""
                     break
         self.assertTrue(found_scaled, "Should find scaled extrusion value")
 
-    def test_last_brick_layer_multiplier(self):
-        """Last brick layer: effective_multiplier = extrusion_multiplier * 0.85."""
+    def test_last_brick_layer_no_deferral(self):
+        """Last brick layer: no loops should be deferred (no layer above
+        to interlock with). All loops emitted at original Z."""
         result = self._run(extrusion_multiplier=1.0, is_last=True)
-        self.assertIsNotNone(result)
-        # Deferred loop 1 body has E=2.5 first. 2.5 * 0.85 = 2.125
-        lines = result.split("\n")
-        deferred_section = False
-        found_scaled = False
-        for line in lines:
-            if ";BrickLayers: shifted loops" in line:
-                deferred_section = True
-            if deferred_section and line.strip().startswith("G1 "):
-                e_val = BrickLayers._getValue(line, "E")
-                x_val = BrickLayers._getValue(line, "X")
-                if e_val is not None and x_val is not None and e_val > 0:
-                    self.assertAlmostEqual(e_val, 2.125, places=3)
-                    found_scaled = True
-                    break
-        self.assertTrue(found_scaled, "Should find scaled extrusion value")
+        # No deferral means no modification → returns None
+        self.assertIsNone(result)
 
     def test_no_wall_sections_returns_none(self):
         """Layer with only infill should return None."""
@@ -828,14 +815,15 @@ class TestEndToEnd(unittest.TestCase):
         return results
 
     def test_sample_gcode_all_layers_processed(self):
-        """Process sample G-code fixture - all layers with inner walls get processed."""
+        """Process sample G-code fixture - layers with inner walls get processed.
+        The last brick layer is NOT modified (no deferral needed)."""
         sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
         with open(sample_path) as f:
             gcode = f.read()
 
         results = self._process_full_gcode(gcode, start_layer=1)
-        # All 3 layers (0,1,2) should be processed since each has WALL-INNER with 3 loops
-        self.assertEqual(len(results), 3, f"Expected 3 layers, got {len(results)}: {list(results.keys())}")
+        # Layers 0 and 1 are processed; layer 2 (last brick) has no deferral
+        self.assertEqual(len(results), 2, f"Expected 2 layers, got {len(results)}: {list(results.keys())}")
 
     def test_sample_gcode_z_shift_correct(self):
         """Verify Z-shift values are correct for each layer."""
@@ -907,18 +895,15 @@ class TestEndToEnd(unittest.TestCase):
         self.assertNotIn(0, results, "Layer 0 should be skipped with start_layer=2")
 
     def test_sample_gcode_first_last_multiplier(self):
-        """First brick layer gets 1.15x, last gets 0.85x."""
+        """First brick layer gets 1.15x multiplier. Last layer has no deferral."""
         sample_path = os.path.join(os.path.dirname(__file__), "sample_gcode.gcode")
         with open(sample_path) as f:
             gcode = f.read()
 
         results = self._process_full_gcode(gcode, start_layer=1, extrusion_multiplier=1.05)
-        # With 3 layers (0,1,2), layer 0 is first, layer 2 is last
-        # First brick: 1.05 * 1.15 = 1.2075
-        # Last brick: 1.05 * 0.85 = 0.8925
-        # Middle: 1.05
+        # With 3 layers (0,1,2), layer 0 is first (1.15x), layer 2 is last (no deferral)
         self.assertIn(0, results)
-        self.assertIn(2, results)
+        self.assertNotIn(2, results, "Last brick layer should not be modified (no deferral)")
 
     def test_gcode_validity_no_nan_no_inf(self):
         """Output G-code should not contain NaN or Inf values."""
@@ -1284,10 +1269,10 @@ G1 F1200 X30 Y30 E{e8}"""
         )
         self.assertIsNotNone(result1)
 
-        # Process layer 2, using end_e1 as output_start_e
+        # Process layer 2 (NOT last brick, so it gets deferred loops)
         result2, end_e2 = self.bl._process_layer(
             layer2, 3, z_shift=0.1, extrusion_multiplier=1.0,
-            is_first_brick=False, is_last_brick=True,
+            is_first_brick=False, is_last_brick=False,
             target_types={"WALL-INNER"}, relative_extrusion=False,
             retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0,
             layer_start_e=14.0, output_start_e=end_e1
@@ -1397,6 +1382,96 @@ class TestFixNextBlockPosition(unittest.TestCase):
         original = data[1]
         self.bl._fix_next_block_position(data, 0, 9000.0)
         self.assertEqual(data[1], original)
+
+
+# =========================================================================
+# _fix_section_position tests
+# =========================================================================
+class TestFixSectionPosition(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_inserts_g0_before_section_g1_extrusion(self):
+        """When section starts with G1 extrusion (no G0), insert G0 travel."""
+        output_lines = ["G1 F1200 X10 Y10 E0.5"]
+        section_lines = [";TYPE:FILL", "G1 F1800 X50 Y50 E1.0"]
+        self.bl._fix_section_position(output_lines, section_lines, 9000.0)
+        # G0 should be inserted before the G1 extrusion
+        self.assertEqual(len(section_lines), 3)  # TYPE + G0 + G1
+        self.assertIn("BrickLayers position-fix", section_lines[1])
+        self.assertIn("X50.000", section_lines[1])
+        self.assertIn("Y50.000", section_lines[1])
+
+    def test_no_insert_when_g0_present(self):
+        """When section has G0 before G1 extrusion, no fix needed."""
+        output_lines = ["G1 F1200 X10 Y10 E0.5"]
+        section_lines = [";TYPE:FILL", "G0 F9000 X50 Y50", "G1 F1800 X60 Y60 E1.0"]
+        original = list(section_lines)
+        self.bl._fix_section_position(output_lines, section_lines, 9000.0)
+        self.assertEqual(section_lines, original)
+
+    def test_skips_retract_unretract(self):
+        """G1 E-only lines (retract/unretract) should be skipped."""
+        output_lines = ["G1 F1200 X10 Y10 E0.5"]
+        section_lines = ["G1 F2700 E-5.0", "G0 F9000 X50 Y50", "G1 F2700 E5.0",
+                         "G1 F1800 X60 Y60 E1.0"]
+        original = list(section_lines)
+        self.bl._fix_section_position(output_lines, section_lines, 9000.0)
+        self.assertEqual(section_lines, original, "G0 in sequence should prevent fix")
+
+
+class TestDeferredLoopSectionContinuity(unittest.TestCase):
+    """Integration test: when last loop in a wall section is deferred,
+    the following 'other' section should get a position-fix."""
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_fill_after_deferred_gets_position_fix(self):
+        """Layer with 2 inner wall loops + fill. Loop 1 deferred, fill
+        should get G0 position-fix if it starts with G1 extrusion."""
+        # 2 loops: L0 (even, kept), L1 (odd, deferred)
+        # Fill starts immediately with G1 extrusion (no G0 travel)
+        layer = """;LAYER:5
+G0 F9000 X100 Y100 Z1.2
+;TYPE:WALL-INNER
+G0 F9000 X10 Y10
+G1 F1200 X20 Y10 E0.5
+G1 F1200 X20 Y20 E1.0
+G1 F1200 X10 Y20 E1.5
+G1 F1200 X10 Y10 E2.0
+G0 F9000 X12 Y12
+G1 F1200 X18 Y12 E2.5
+G1 F1200 X18 Y18 E3.0
+G1 F1200 X12 Y18 E3.5
+G1 F1200 X12 Y12 E4.0
+;TYPE:FILL
+G1 F1800 X15 Y15 E4.5"""
+        result, _ = self.bl._process_layer(
+            layer, 5, z_shift=0.1, extrusion_multiplier=1.0,
+            is_first_brick=False, is_last_brick=False,
+            target_types={"WALL-INNER"}, relative_extrusion=True,
+            retract_length=5.0, retract_speed=2400.0, travel_speed=9000.0
+        )
+        self.assertIsNotNone(result)
+        lines = result.split("\n")
+        # Find the FILL section - check if a position-fix G0 was inserted
+        fill_idx = None
+        for i, line in enumerate(lines):
+            if ";TYPE:FILL" in line:
+                fill_idx = i
+                break
+        self.assertIsNotNone(fill_idx)
+        # Between TYPE:FILL and the first G1 extrusion, there should be
+        # a position-fix G0
+        found_fix = False
+        for i in range(fill_idx, min(fill_idx + 3, len(lines))):
+            if "BrickLayers position-fix" in lines[i]:
+                found_fix = True
+                break
+        self.assertTrue(found_fix,
+            f"Expected position-fix after ;TYPE:FILL. Lines: {lines[fill_idx:fill_idx+3]}")
 
 
 if __name__ == "__main__":

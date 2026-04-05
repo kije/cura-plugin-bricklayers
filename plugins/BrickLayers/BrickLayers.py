@@ -747,14 +747,26 @@ class BrickLayers(Extension):
         # H4 fix: track wall type per deferred loop for correct TYPE markers
         all_deferred: List[Tuple[PerimeterLoop, str]] = []
 
+        # Track whether the last loop section deferred its final loop,
+        # which means position continuity may be broken for the next section.
+        last_section_deferred_last = False
+
         for section in sections:
             if section[0] == "other":
+                # If previous loops section deferred its last loop, the nozzle
+                # is at a different position than the original. Fix position
+                # for the first G1 extrusion in this section if needed.
+                if last_section_deferred_last:
+                    self._fix_section_position(output_lines, section[1],
+                                               travel_speed)
+                    last_section_deferred_last = False
                 output_lines.extend(section[1])
             elif section[0] == "loops":
                 loops = section[1]
                 section_wall_type = section[2] if len(section) > 2 else "WALL-INNER"
                 # H3 fix: reset loop counter per wall section
                 loop_counter = 0
+                last_section_deferred_last = False
 
                 for loop in loops:
                     if not loop.has_extrusion:
@@ -762,11 +774,16 @@ class BrickLayers(Extension):
                         output_lines.extend(loop.body_lines)
                         continue
 
-                    if loop_counter % 2 == 1:
-                        all_deferred.append((loop, section_wall_type))
-                    else:
+                    # On the last brick layer, don't defer any loops.
+                    # There's no layer above to interlock with, and shifting
+                    # loops up causes inner walls to extend above the model.
+                    if is_last_brick or loop_counter % 2 == 0:
                         output_lines.extend(loop.prefix_lines)
                         output_lines.extend(loop.body_lines)
+                        last_section_deferred_last = False
+                    else:
+                        all_deferred.append((loop, section_wall_type))
+                        last_section_deferred_last = True
                     loop_counter += 1
 
         if not all_deferred:
@@ -963,6 +980,43 @@ class BrickLayers(Extension):
             travel_line = " ".join(travel_parts) + " ;BrickLayers position-fix"
             lines.insert(insert_pos, travel_line)
             data[next_index] = "\n".join(lines)
+
+    def _fix_section_position(self, output_lines: List[str],
+                               section_lines: List[str],
+                               travel_speed: float) -> None:
+        """Fix position continuity between a loops section and a following
+        'other' section within the same layer.
+
+        When the last loop in a wall section was deferred (skipped), the
+        nozzle is at the previous even loop's end, not where the original
+        slicer left it. If the 'other' section starts with G1 extrusion
+        without a preceding G0 travel, a diagonal extrusion line would
+        result. This inserts a G0 travel to prevent that.
+        """
+        for i, line in enumerate(section_lines):
+            stripped = line.strip()
+
+            if stripped.startswith("G0 "):
+                x = self._getValue(stripped, "X")
+                y = self._getValue(stripped, "Y")
+                if x is not None or y is not None:
+                    return  # Already positioned by G0
+
+            elif stripped.startswith("G1 "):
+                e = self._getValue(stripped, "E")
+                x = self._getValue(stripped, "X")
+                y = self._getValue(stripped, "Y")
+                if e is not None and (x is not None or y is not None):
+                    # First extrusion without preceding G0 — insert travel
+                    travel_parts = ["G0", "F%.0f" % travel_speed]
+                    if x is not None:
+                        travel_parts.append("X%.3f" % x)
+                    if y is not None:
+                        travel_parts.append("Y%.3f" % y)
+                    # Insert into section_lines before the G1 extrusion
+                    section_lines.insert(
+                        i, " ".join(travel_parts) + " ;BrickLayers position-fix")
+                    return
 
     def _convert_to_relative_e(self, layer_gcode: str,
                                 start_e: float) -> Tuple[str, float]:
