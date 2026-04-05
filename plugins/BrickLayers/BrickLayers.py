@@ -406,6 +406,13 @@ class BrickLayers(Extension):
                 data[index] = new_layer
                 layers_modified += 1
 
+                # Fix position continuity at layer boundaries:
+                # BrickLayers reorders loops, so the nozzle ends at a different
+                # XY than the original layer. The next data block's first G1
+                # extrusion move assumes position continuity from the original.
+                # Insert a G0 travel to bridge the gap.
+                self._fix_next_block_position(data, index, travel_speed)
+
             # Update E tracking for the next layer
             if not relative_extrusion:
                 original_e = original_layer_end_e
@@ -877,6 +884,64 @@ class BrickLayers(Extension):
                 if e_val is not None and x_val is not None and e_val > 0:
                     return False
         return False
+
+    def _fix_next_block_position(self, data: List[str], current_index: int,
+                                  travel_speed: float) -> None:
+        """Insert a G0 travel at the start of the next data block if needed.
+
+        After BrickLayers reorders loops in a layer, the nozzle ends at a
+        different XY than the original slicer output. The next data block's
+        first G1 extrusion move assumes position continuity from the original.
+        This creates a diagonal extrusion line from the wrong start position.
+
+        Fix: find the next block's first G1 with X/Y+E (extrusion move).
+        If no G0 travel precedes it to set XY position, insert one.
+        """
+        next_index = current_index + 1
+        if next_index >= len(data):
+            return
+
+        next_block = data[next_index]
+        lines = next_block.split("\n")
+
+        # Find the first G1 extrusion move (has X or Y + E) in the next block.
+        # If a G0 with X or Y appears before it, the nozzle is already
+        # positioned correctly and no fix is needed.
+        insert_pos = None
+        target_x = None
+        target_y = None
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            if stripped.startswith("G0 "):
+                x = self._getValue(stripped, "X")
+                y = self._getValue(stripped, "Y")
+                if x is not None or y is not None:
+                    # A G0 travel already positions the nozzle — no fix needed
+                    return
+
+            elif stripped.startswith("G1 "):
+                e = self._getValue(stripped, "E")
+                x = self._getValue(stripped, "X")
+                y = self._getValue(stripped, "Y")
+                if e is not None and (x is not None or y is not None):
+                    # This is the first extrusion move — needs a preceding
+                    # G0 travel to ensure correct start position
+                    insert_pos = i
+                    target_x = x
+                    target_y = y
+                    break
+
+        if insert_pos is not None and (target_x is not None or target_y is not None):
+            travel_parts = ["G0", "F%.0f" % travel_speed]
+            if target_x is not None:
+                travel_parts.append("X%.3f" % target_x)
+            if target_y is not None:
+                travel_parts.append("Y%.3f" % target_y)
+            travel_line = " ".join(travel_parts) + " ;BrickLayers position-fix"
+            lines.insert(insert_pos, travel_line)
+            data[next_index] = "\n".join(lines)
 
     def _convert_to_relative_e(self, layer_gcode: str,
                                 start_e: float) -> Tuple[str, float]:

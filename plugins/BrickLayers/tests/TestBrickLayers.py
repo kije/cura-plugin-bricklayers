@@ -1274,5 +1274,82 @@ G1 F1200 X30 Y30 E{e8}"""
             f"E jump between layers too large: {last_e_layer1} -> {first_e_layer2}")
 
 
+# =========================================================================
+# _fix_next_block_position tests
+# =========================================================================
+class TestFixNextBlockPosition(unittest.TestCase):
+
+    def setUp(self):
+        self.bl = _make_instance()
+
+    def test_inserts_g0_before_first_extrusion(self):
+        """When next block starts with G1 extrusion (no preceding G0),
+        a G0 travel should be inserted."""
+        data = [
+            "processed layer data",
+            ";LAYER:4\n;TYPE:FILL\nG1 F1686.7 X163.26 Y118.26 E11.91\nG1 X164 Y119 E12.0\n",
+        ]
+        self.bl._fix_next_block_position(data, 0, 9000.0)
+        lines = data[1].split("\n")
+        # Should have a G0 position-fix before the first G1 extrusion
+        fix_line = None
+        for i, line in enumerate(lines):
+            if "BrickLayers position-fix" in line:
+                fix_line = i
+                break
+        self.assertIsNotNone(fix_line, "No position-fix G0 was inserted")
+        self.assertIn("X163.260", lines[fix_line])
+        self.assertIn("Y118.260", lines[fix_line])
+        self.assertTrue(lines[fix_line].strip().startswith("G0"))
+
+    def test_no_insert_when_g0_already_positions(self):
+        """When next block has G0 travel before first extrusion, no fix needed."""
+        data = [
+            "processed layer data",
+            ";LAYER:4\nG0 F9000 X163.26 Y118.26\nG1 F1686.7 X164 Y119 E12.0\n",
+        ]
+        original = data[1]
+        self.bl._fix_next_block_position(data, 0, 9000.0)
+        self.assertEqual(data[1], original, "Should not modify block with existing G0 travel")
+
+    def test_no_insert_when_no_next_block(self):
+        """When there's no next data block, nothing happens."""
+        data = ["processed layer data"]
+        self.bl._fix_next_block_position(data, 0, 9000.0)
+        self.assertEqual(len(data), 1)
+
+    def test_skips_e_only_g1_before_extrusion(self):
+        """G1 with E only (unretract) should be skipped; fix inserted
+        before first G1 with XY+E."""
+        data = [
+            "processed layer data",
+            ";LAYER:4\nG1 F2700 E5.0\n;TYPE:FILL\nG1 F1686.7 X100 Y100 E5.1\n",
+        ]
+        self.bl._fix_next_block_position(data, 0, 9000.0)
+        lines = data[1].split("\n")
+        fix_idx = None
+        for i, line in enumerate(lines):
+            if "BrickLayers position-fix" in line:
+                fix_idx = i
+                break
+        self.assertIsNotNone(fix_idx)
+        # The fix should come after the unretract (G1 E5.0) but before
+        # the extrusion move
+        self.assertIn("X100.000", lines[fix_idx])
+        # The unretract should still be before the fix (somewhere earlier)
+        unretract_found = any("E5.0" in l for l in lines[:fix_idx])
+        self.assertTrue(unretract_found, "Unretract should precede position-fix")
+
+    def test_no_insert_for_non_extrusion_block(self):
+        """Next block with no G1 extrusion (e.g., end G-code) is left alone."""
+        data = [
+            "processed layer data",
+            "M104 S0\nM140 S0\nG0 X0 Y200\n",
+        ]
+        original = data[1]
+        self.bl._fix_next_block_position(data, 0, 9000.0)
+        self.assertEqual(data[1], original)
+
+
 if __name__ == "__main__":
     unittest.main()
