@@ -78,16 +78,52 @@ class BrickLayersPreviewJob(Job):
             self._progress_message.hide()
 
     def _reparse_gcode(self, gcode_list: List[str]):
-        """Parse modified G-code into LayerData using GCodeReader."""
+        """Parse modified G-code into LayerData using FlavorParser directly.
+
+        FlavorParser.processGCodeStream() has several side effects designed
+        for loading .gcode files that are destructive when used for preview
+        refresh: it overwrites scene.gcode_dict, shows a caution message,
+        and sets backend state to Disabled (which resets the "sliced" state
+        and shows the Slice button again).
+
+        We work around this by saving and restoring the state that
+        FlavorParser clobbers.
+        """
         gcode_reader = PluginRegistry.getInstance().getPluginObject("GCodeReader")
         if gcode_reader is None:
             Logger.log("w", "BrickLayers: GCodeReader plugin not available")
             return None
-        gcode_stream = "\n".join(gcode_list)
-        gcode_reader.preReadFromStream(gcode_stream)
-        result_node = gcode_reader.readFromStream(
-            gcode_stream, "bricklayers_preview"
+
+        app = CuraApplication.getInstance()
+        scene = app.getController().getScene()
+        backend = app.getBackend()
+
+        # Save state that FlavorParser will clobber
+        saved_gcode_dict = getattr(scene, "gcode_dict", None)
+        saved_backend_state = backend.getState() if backend else None
+        saved_show_caution = app.getPreferences().getValue(
+            "gcodereader/show_caution"
         )
+
+        try:
+            # Suppress the "G-code Details" caution message
+            app.getPreferences().setValue("gcodereader/show_caution", False)
+
+            gcode_stream = "\n".join(gcode_list)
+            gcode_reader.preReadFromStream(gcode_stream)
+            result_node = gcode_reader.readFromStream(
+                gcode_stream, "bricklayers_preview"
+            )
+        finally:
+            # Restore all clobbered state
+            if saved_gcode_dict is not None:
+                scene.gcode_dict = saved_gcode_dict
+            if backend is not None and saved_backend_state is not None:
+                backend.setState(saved_backend_state)
+            app.getPreferences().setValue(
+                "gcodereader/show_caution", saved_show_caution
+            )
+
         if result_node is None:
             return None
         return result_node.callDecoration("getLayerData")
@@ -470,9 +506,34 @@ class BrickLayers(Extension):
             if gcode_reader is None:
                 return
 
-            gcode_stream = "\n".join(gcode_list)
-            gcode_reader.preReadFromStream(gcode_stream)
-            result_node = gcode_reader.readFromStream(gcode_stream, "bricklayers_preview")
+            app = CuraApplication.getInstance()
+            backend = app.getBackend()
+
+            # Save state that FlavorParser will clobber
+            saved_gcode_dict = getattr(scene, "gcode_dict", None)
+            saved_backend_state = backend.getState() if backend else None
+            saved_show_caution = app.getPreferences().getValue(
+                "gcodereader/show_caution"
+            )
+
+            try:
+                # Suppress the "G-code Details" caution message
+                app.getPreferences().setValue("gcodereader/show_caution", False)
+
+                gcode_stream = "\n".join(gcode_list)
+                gcode_reader.preReadFromStream(gcode_stream)
+                result_node = gcode_reader.readFromStream(
+                    gcode_stream, "bricklayers_preview"
+                )
+            finally:
+                # Restore all clobbered state
+                if saved_gcode_dict is not None:
+                    scene.gcode_dict = saved_gcode_dict
+                if backend is not None and saved_backend_state is not None:
+                    backend.setState(saved_backend_state)
+                app.getPreferences().setValue(
+                    "gcodereader/show_caution", saved_show_caution
+                )
 
             if result_node is None:
                 return
