@@ -18,7 +18,6 @@ _MOCK_MODULES = [
     "UM",
     "UM.Application",
     "UM.Extension",
-    "UM.Job",
     "UM.Logger",
     "UM.Message",
     "UM.PluginRegistry",
@@ -40,22 +39,7 @@ sys.modules["UM.Extension"].Extension = type(
     "Extension", (), {"__init__": lambda self: None}
 )
 
-# Make Job a real base class so BrickLayersPreviewJob can inherit from it
-_MockSignal = type("MockSignal", (), {
-    "connect": lambda self, cb: None,
-    "disconnect": lambda self, cb: None,
-    "emit": lambda self, *a, **kw: None,
-})
-
-sys.modules["UM.Job"].Job = type(
-    "Job", (), {
-        "__init__": lambda self: setattr(self, "finished", _MockSignal()),
-        "isRunning": lambda self: False,
-        "start": lambda self: None,
-    }
-)
-
-# Make Message a real class so BrickLayersPreviewJob can instantiate it
+# Make Message a real class so BrickLayers can instantiate it
 sys.modules["UM.Message"].Message = type(
     "Message", (), {
         "__init__": lambda self, *a, **kw: None,
@@ -76,7 +60,6 @@ _bl_module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_bl_module)
 
 BrickLayers = _bl_module.BrickLayers
-BrickLayersPreviewJob = _bl_module.BrickLayersPreviewJob
 PerimeterLoop = _bl_module.PerimeterLoop
 
 
@@ -2101,9 +2084,9 @@ class TestPreviewPipeline(unittest.TestCase):
                 )
 
     # ----- Test 10 -----
-    def test_preview_job_stores_results(self):
-        """BrickLayersPreviewJob should store modified_gcode and
-        new_layer_data after successful run (mocked GCodeReader)."""
+    def test_reparse_gcode_calls_gcode_reader(self):
+        """_reparse_gcode should use GCodeReader to parse G-code and
+        return LayerData from the result node."""
         mock_gcode_reader = MagicMock()
         mock_result_node = MagicMock()
         mock_layer_data = MagicMock()
@@ -2113,14 +2096,16 @@ class TestPreviewPipeline(unittest.TestCase):
             mock_gcode_reader
         )
 
-        target_node = MagicMock()
-        job = BrickLayersPreviewJob(self.bl, self.sample_gcode, target_node)
-        job.run()
+        # Mock the backend and preferences for state save/restore
+        mock_backend = MagicMock()
+        self.mock_app.getBackend.return_value = mock_backend
+        self.mock_app.getPreferences.return_value.getValue.return_value = True
 
-        self.assertIsNotNone(job._modified_gcode)
-        self.assertIsNotNone(job._new_layer_data)
-        self.assertEqual(job._new_layer_data, mock_layer_data)
-        self.assertEqual(len(job._modified_gcode), len(self.sample_gcode))
+        result = self.bl._reparse_gcode(self.sample_gcode)
+
+        self.assertEqual(result, mock_layer_data)
+        mock_gcode_reader.preReadFromStream.assert_called_once()
+        mock_gcode_reader.readFromStream.assert_called_once()
 
 
 if __name__ == "__main__":

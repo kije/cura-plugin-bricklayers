@@ -16,7 +16,6 @@ from typing import Dict, List, Any, Optional, Tuple
 
 from UM.Application import Application
 from UM.Extension import Extension
-from UM.Job import Job
 from UM.Logger import Logger
 from UM.Message import Message
 from UM.PluginRegistry import PluginRegistry
@@ -28,105 +27,6 @@ from UM.i18n import i18nCatalog
 from cura.CuraApplication import CuraApplication
 
 _BRICK_LAYERS_MARKER = ";BRICKLAYERS_PROCESSED"
-
-
-class BrickLayersPreviewJob(Job):
-    """Background job that runs BrickLayers G-code transformation and
-    re-parses the result into LayerData for the SimulationView preview.
-
-    This allows the preview to show the final post-processed G-code
-    without blocking the UI thread.
-    """
-
-    def __init__(self, brick_layers_plugin: "BrickLayers",
-                 gcode_list: List[str], target_node) -> None:
-        super().__init__()
-        self._plugin = brick_layers_plugin
-        self._gcode_list = list(gcode_list)  # copy to avoid mutation
-        self._target_node = target_node
-        self._abort = False
-        self._modified_gcode: Optional[List[str]] = None
-        self._new_layer_data = None
-        self._progress_message = Message(
-            "BrickLayers: Processing preview...",
-            lifetime=0, dismissable=False, progress=0,
-            title="BrickLayers"
-        )
-
-    def abort(self) -> None:
-        self._abort = True
-
-    def run(self) -> None:
-        self._progress_message.show()
-        try:
-            # Phase 1: Run G-code transformation
-            self._progress_message.setProgress(10)
-            self._modified_gcode = self._plugin._execute(self._gcode_list)
-            if self._abort:
-                return
-
-            # Phase 2: Re-parse via GCodeReader into LayerData
-            self._progress_message.setProgress(70)
-            self._new_layer_data = self._reparse_gcode(self._modified_gcode)
-            if self._abort:
-                return
-
-            self._progress_message.setProgress(100)
-        except Exception:
-            Logger.logException("w", "BrickLayers: Preview job failed")
-        finally:
-            self._progress_message.hide()
-
-    def _reparse_gcode(self, gcode_list: List[str]):
-        """Parse modified G-code into LayerData using FlavorParser directly.
-
-        FlavorParser.processGCodeStream() has several side effects designed
-        for loading .gcode files that are destructive when used for preview
-        refresh: it overwrites scene.gcode_dict, shows a caution message,
-        and sets backend state to Disabled (which resets the "sliced" state
-        and shows the Slice button again).
-
-        We work around this by saving and restoring the state that
-        FlavorParser clobbers.
-        """
-        gcode_reader = PluginRegistry.getInstance().getPluginObject("GCodeReader")
-        if gcode_reader is None:
-            Logger.log("w", "BrickLayers: GCodeReader plugin not available")
-            return None
-
-        app = CuraApplication.getInstance()
-        scene = app.getController().getScene()
-        backend = app.getBackend()
-
-        # Save state that FlavorParser will clobber
-        saved_gcode_dict = getattr(scene, "gcode_dict", None)
-        saved_backend_state = backend.getState() if backend else None
-        saved_show_caution = app.getPreferences().getValue(
-            "gcodereader/show_caution"
-        )
-
-        try:
-            # Suppress the "G-code Details" caution message
-            app.getPreferences().setValue("gcodereader/show_caution", False)
-
-            gcode_stream = "\n".join(gcode_list)
-            gcode_reader.preReadFromStream(gcode_stream)
-            result_node = gcode_reader.readFromStream(
-                gcode_stream, "bricklayers_preview"
-            )
-        finally:
-            # Restore all clobbered state
-            if saved_gcode_dict is not None:
-                scene.gcode_dict = saved_gcode_dict
-            if backend is not None and saved_backend_state is not None:
-                backend.setState(saved_backend_state)
-            app.getPreferences().setValue(
-                "gcodereader/show_caution", saved_show_caution
-            )
-
-        if result_node is None:
-            return None
-        return result_node.callDecoration("getLayerData")
 
 
 class PerimeterLoop:
@@ -214,7 +114,7 @@ class BrickLayers(Extension):
         )
 
         # Preview pipeline: process G-code after slicing and update preview
-        self._preview_job: Optional[BrickLayersPreviewJob] = None
+        self._preview_pending = False
         self._application.callLater(self._connectSceneSignals)
 
     # ------------------------------------------------------------------ #
@@ -333,8 +233,12 @@ class BrickLayers(Extension):
 
         After slicing, ProcessSlicedLayersJob attaches a node with LayerData
         to the scene, which fires this signal.  At that point gcode_dict is
-        already populated, so we can run BrickLayers and update the preview.
+        already populated, so we schedule post-processing via callLater to
+        run on the main thread after the current signal handler returns.
         """
+        if self._preview_pending:
+            return
+
         global_stack = CuraApplication.getInstance().getGlobalContainerStack()
         if not global_stack:
             return
@@ -372,72 +276,103 @@ class BrickLayers(Extension):
         if target_node is None:
             return
 
-        # Abort any running preview job
-        if self._preview_job is not None and self._preview_job.isRunning():
-            self._preview_job.abort()
-            self._preview_job = None
+        # Schedule deferred processing on the main thread.
+        # Using callLater ensures we run after all pending signal handlers
+        # and Qt events have been processed.
+        self._preview_pending = True
+        self._application.callLater(self._runPreviewPostProcess)
 
-        # Launch background job
-        self._preview_job = BrickLayersPreviewJob(
-            self, gcode_list, target_node
-        )
-        self._preview_job.finished.connect(self._onPreviewJobFinished)
-        self._preview_job.start()
+    def _runPreviewPostProcess(self) -> None:
+        """Run BrickLayers G-code transformation and refresh the preview.
 
-    def _onPreviewJobFinished(self, job: BrickLayersPreviewJob) -> None:
-        """Called on the main thread when the preview job completes."""
-        if job is not self._preview_job:
-            return  # stale job
+        Runs synchronously on the main Qt thread (via callLater).
+        FlavorParser and all Qt/scene operations are safe here.
+        """
+        self._preview_pending = False
 
-        if (
-            self._preview_job._modified_gcode is None
-            or self._preview_job._new_layer_data is None
-        ):
-            Logger.log("w", "BrickLayers: Preview job produced no layer data")
-            self._preview_job = None
-            return
+        try:
+            scene = self._application.getController().getScene()
+            gcode_dict = getattr(scene, "gcode_dict", None)
+            if not gcode_dict:
+                return
 
-        # Replace LayerData on the scene node
-        from cura.LayerDataDecorator import LayerDataDecorator
+            active_build_plate_id = (
+                CuraApplication.getInstance()
+                .getMultiBuildPlateModel()
+                .activeBuildPlate
+            )
+            gcode_list = gcode_dict.get(active_build_plate_id)
+            if not gcode_list:
+                return
 
-        target_node = job._target_node
-        old_decorator = target_node.getDecorator(LayerDataDecorator)
-        if old_decorator:
-            old_decorator.setLayerData(job._new_layer_data)
-        else:
-            decorator = LayerDataDecorator()
-            decorator.setLayerData(job._new_layer_data)
-            target_node.addDecorator(decorator)
+            # Double-check marker (may have been processed by writeStarted
+            # between scheduling and execution)
+            if _BRICK_LAYERS_MARKER in gcode_list[0]:
+                return
 
-        # Update gcode_dict so writeStarted finds already-processed data
-        scene = self._application.getController().getScene()
-        gcode_dict = getattr(scene, "gcode_dict", {})
-        active_build_plate_id = (
-            CuraApplication.getInstance()
-            .getMultiBuildPlateModel()
-            .activeBuildPlate
-        )
-        modified_gcode = job._modified_gcode
-        modified_gcode[0] += _BRICK_LAYERS_MARKER + "\n"
-        gcode_dict[active_build_plate_id] = modified_gcode
-        setattr(scene, "gcode_dict", gcode_dict)
+            progress_message = Message(
+                "BrickLayers: Processing preview...",
+                lifetime=0, dismissable=False, progress=-1,
+                title="BrickLayers"
+            )
+            progress_message.show()
 
-        # Notify SimulationView to recalculate layers/paths
-        view = self._application.getController().getActiveView()
-        if hasattr(view, "resetLayerData"):
-            view.resetLayerData()
+            try:
+                # Phase 1: Run G-code transformation
+                modified_gcode = self._execute(gcode_list)
 
-        Logger.log("d", "BrickLayers: Preview updated with post-processed G-code")
-        self._preview_job = None
+                # Phase 2: Re-parse modified G-code into LayerData
+                new_layer_data = self._reparse_gcode(modified_gcode)
+                if new_layer_data is None:
+                    Logger.log("w", "BrickLayers: Failed to parse modified G-code")
+                    return
+
+                # Phase 3: Replace LayerData on scene node
+                from cura.LayerDataDecorator import LayerDataDecorator
+                from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
+
+                target_node = None
+                for n in DepthFirstIterator(scene.getRoot()):
+                    if n.callDecoration("getLayerData"):
+                        target_node = n
+                        break
+
+                if target_node is None:
+                    Logger.log("w", "BrickLayers: No LayerData node found for preview update")
+                    return
+
+                old_decorator = target_node.getDecorator(LayerDataDecorator)
+                if old_decorator:
+                    old_decorator.setLayerData(new_layer_data)
+                else:
+                    decorator = LayerDataDecorator()
+                    decorator.setLayerData(new_layer_data)
+                    target_node.addDecorator(decorator)
+
+                # Update gcode_dict so writeStarted finds processed data
+                modified_gcode[0] += _BRICK_LAYERS_MARKER + "\n"
+                gcode_dict[active_build_plate_id] = modified_gcode
+                setattr(scene, "gcode_dict", gcode_dict)
+
+                # Notify SimulationView to recalculate layers/paths
+                view = self._application.getController().getActiveView()
+                if hasattr(view, "resetLayerData"):
+                    view.resetLayerData()
+
+                Logger.log("d", "BrickLayers: Preview updated with post-processed G-code")
+
+            finally:
+                progress_message.hide()
+
+        except Exception:
+            Logger.logException("w", "BrickLayers: Preview post-processing failed")
 
     def _onBackendStateChange(self, state) -> None:
-        """Abort preview job if a new slice starts."""
+        """Cancel pending preview processing if a new slice starts."""
         from UM.Backend.Backend import BackendState
 
         if state in (BackendState.NotStarted, BackendState.Processing):
-            if self._preview_job is not None and self._preview_job.isRunning():
-                self._preview_job.abort()
-                self._preview_job = None
+            self._preview_pending = False
 
     # ------------------------------------------------------------------ #
     # GCode pipeline hook (fallback for immediate save before preview)
@@ -478,6 +413,56 @@ class BrickLayers(Extension):
         setattr(scene, "gcode_dict", gcode_dict)
 
         self._refreshPreviewLayerData(scene, gcode_list)
+
+    def _reparse_gcode(self, gcode_list: List[str]):
+        """Parse modified G-code into LayerData using GCodeReader/FlavorParser.
+
+        FlavorParser.processGCodeStream() has several side effects designed
+        for loading .gcode files that are destructive when used for preview
+        refresh: it overwrites scene.gcode_dict, shows a caution message,
+        and sets backend state to Disabled (which resets the "sliced" state
+        and shows the Slice button again).
+
+        We save and restore all state that FlavorParser clobbers.
+        """
+        gcode_reader = PluginRegistry.getInstance().getPluginObject("GCodeReader")
+        if gcode_reader is None:
+            Logger.log("w", "BrickLayers: GCodeReader plugin not available")
+            return None
+
+        app = CuraApplication.getInstance()
+        scene = app.getController().getScene()
+        backend = app.getBackend()
+
+        # Save state that FlavorParser will clobber
+        saved_gcode_dict = getattr(scene, "gcode_dict", None)
+        saved_backend_state = backend.getState() if backend else None
+        saved_show_caution = app.getPreferences().getValue(
+            "gcodereader/show_caution"
+        )
+
+        try:
+            # Suppress the "G-code Details" caution message
+            app.getPreferences().setValue("gcodereader/show_caution", False)
+
+            gcode_stream = "\n".join(gcode_list)
+            gcode_reader.preReadFromStream(gcode_stream)
+            result_node = gcode_reader.readFromStream(
+                gcode_stream, "bricklayers_preview"
+            )
+        finally:
+            # Restore all clobbered state
+            if saved_gcode_dict is not None:
+                scene.gcode_dict = saved_gcode_dict
+            if backend is not None and saved_backend_state is not None:
+                backend.setState(saved_backend_state)
+            app.getPreferences().setValue(
+                "gcodereader/show_caution", saved_show_caution
+            )
+
+        if result_node is None:
+            return None
+        return result_node.callDecoration("getLayerData")
 
     def _refreshPreviewLayerData(self, scene, gcode_list: List[str]) -> None:
         """Attempt to refresh the preview layer data with the modified G-code.
