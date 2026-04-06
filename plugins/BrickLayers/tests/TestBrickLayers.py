@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 _MOCK_MODULES = [
     "UM",
     "UM.Application",
+    "UM.Backend",
+    "UM.Backend.Backend",
     "UM.Extension",
     "UM.Logger",
     "UM.Message",

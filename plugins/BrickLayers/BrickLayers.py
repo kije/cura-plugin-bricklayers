@@ -436,7 +436,6 @@ class BrickLayers(Extension):
 
         # Save state that FlavorParser will clobber
         saved_gcode_dict = getattr(scene, "gcode_dict", None)
-        saved_backend_state = backend.getState() if backend else None
         saved_show_caution = app.getPreferences().getValue(
             "gcodereader/show_caution"
         )
@@ -454,11 +453,14 @@ class BrickLayers(Extension):
             # Restore all clobbered state
             if saved_gcode_dict is not None:
                 scene.gcode_dict = saved_gcode_dict
-            if backend is not None and saved_backend_state is not None:
-                backend.setState(saved_backend_state)
             app.getPreferences().setValue(
                 "gcodereader/show_caution", saved_show_caution
             )
+            # FlavorParser sets backend to Disabled; restore to Done
+            # (we know slicing completed since we only run after slicing)
+            if backend is not None:
+                from UM.Backend.Backend import Backend
+                backend.setState(Backend.BackendState.Done)
 
         if result_node is None:
             return None
@@ -496,7 +498,6 @@ class BrickLayers(Extension):
 
             # Save state that FlavorParser will clobber
             saved_gcode_dict = getattr(scene, "gcode_dict", None)
-            saved_backend_state = backend.getState() if backend else None
             saved_show_caution = app.getPreferences().getValue(
                 "gcodereader/show_caution"
             )
@@ -514,11 +515,13 @@ class BrickLayers(Extension):
                 # Restore all clobbered state
                 if saved_gcode_dict is not None:
                     scene.gcode_dict = saved_gcode_dict
-                if backend is not None and saved_backend_state is not None:
-                    backend.setState(saved_backend_state)
                 app.getPreferences().setValue(
                     "gcodereader/show_caution", saved_show_caution
                 )
+                # FlavorParser sets backend to Disabled; restore to Done
+                if backend is not None:
+                    from UM.Backend.Backend import Backend
+                    backend.setState(Backend.BackendState.Done)
 
             if result_node is None:
                 return
