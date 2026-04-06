@@ -459,8 +459,8 @@ class BrickLayers(Extension):
             # FlavorParser sets backend to Disabled; restore to Done
             # (we know slicing completed since we only run after slicing)
             if backend is not None:
-                from UM.Backend.Backend import Backend
-                backend.setState(Backend.BackendState.Done)
+                from UM.Backend.Backend import BackendState
+                backend.setState(BackendState.Done)
 
         if result_node is None:
             return None
@@ -520,8 +520,8 @@ class BrickLayers(Extension):
                 )
                 # FlavorParser sets backend to Disabled; restore to Done
                 if backend is not None:
-                    from UM.Backend.Backend import Backend
-                    backend.setState(Backend.BackendState.Done)
+                    from UM.Backend.Backend import BackendState
+                    backend.setState(BackendState.Done)
 
             if result_node is None:
                 return
