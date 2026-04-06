@@ -2085,29 +2085,166 @@ class TestPreviewPipeline(unittest.TestCase):
                     f"Forbidden command {cmd} in block {block_idx}: {stripped}",
                 )
 
-    # ----- Test 10 -----
-    def test_reparse_gcode_calls_gcode_reader(self):
-        """_reparse_gcode should use GCodeReader to parse G-code and
-        return LayerData from the result node."""
-        mock_gcode_reader = MagicMock()
-        mock_result_node = MagicMock()
-        mock_layer_data = MagicMock()
-        mock_result_node.callDecoration.return_value = mock_layer_data
-        mock_gcode_reader.readFromStream.return_value = mock_result_node
-        _bl_module.PluginRegistry.getInstance.return_value.getPluginObject.return_value = (
-            mock_gcode_reader
+class TestDualExtruder(unittest.TestCase):
+    """Tests for dual-extruder G-code handling.
+
+    Verifies that tool change commands (T0/T1) are handled correctly:
+    foreign extruder lines pass through unchanged, and BrickLayers
+    only processes the primary extruder's wall loops.
+    """
+
+    def setUp(self):
+        self.bl = _make_instance()
+        self.mock_app = MagicMock()
+        self.mock_stack = MagicMock()
+        self.mock_stack.getProperty.side_effect = self._mock_get_property
+        _bl_module.CuraApplication.getInstance.return_value = self.mock_app
+        self.mock_app.getGlobalContainerStack.return_value = self.mock_stack
+
+    def _mock_get_property(self, key, prop):
+        settings = {
+            "brick_layers_enabled": True,
+            "layer_height": 0.2,
+            "brick_layers_extrusion_multiplier": 1.0,
+            "brick_layers_start_layer": 1,
+            "brick_layers_end_layer": -1,
+            "brick_layers_apply_inner_walls": True,
+            "brick_layers_apply_outer_walls": False,
+            "speed_travel": 150.0,
+            "machine_extruder_count": 2,
+            "retraction_amount": 5.0,
+            "retraction_retract_speed": 40.0,
+            "relative_extrusion": False,
+        }
+        return settings.get(key)
+
+    def _make_dual_extruder_gcode(self):
+        """Create G-code with two extruders: T0 for model, T1 for support."""
+        header = ";Generated with Cura\nM82\nG28\n"
+        # Layer 0: T0 walls + T1 support
+        layer0 = (
+            ";LAYER:0\n"
+            "G0 F9000 X10 Y10 Z0.2\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E0.5\nG1 X20 Y20 E1.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E1.5\nG1 X18 Y18 E2.0\n"
+            ";TYPE:SUPPORT\n"
+            "T1\n"
+            "G92 E0\n"
+            "G0 F9000 X50 Y50\n"
+            "G1 F800 X60 Y50 E0.5\nG1 X60 Y60 E1.0\n"
+            "T0\n"
         )
+        # Layer 1: same structure
+        layer1 = (
+            ";LAYER:1\n"
+            "G0 F9000 X10 Y10 Z0.4\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E2.5\nG1 X20 Y20 E3.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E3.5\nG1 X18 Y18 E4.0\n"
+            ";TYPE:SUPPORT\n"
+            "T1\n"
+            "G92 E0\n"
+            "G0 F9000 X50 Y50\n"
+            "G1 F800 X60 Y50 E0.5\nG1 X60 Y60 E1.0\n"
+            "T0\n"
+        )
+        return [header, layer0, layer1]
 
-        # Mock the backend and preferences for state save/restore
-        mock_backend = MagicMock()
-        self.mock_app.getBackend.return_value = mock_backend
-        self.mock_app.getPreferences.return_value.getValue.return_value = True
+    def test_foreign_extruder_lines_unchanged(self):
+        """Lines between T1 and T0 must pass through unchanged."""
+        gcode = self._make_dual_extruder_gcode()
+        result = self.bl._execute(list(gcode))
 
-        result = self.bl._reparse_gcode(self.sample_gcode)
+        for block_idx, block in enumerate(result):
+            if block_idx == 0:
+                continue
+            lines = block.split("\n")
+            in_foreign = False
+            foreign_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped == "T1":
+                    in_foreign = True
+                    continue
+                if stripped == "T0":
+                    in_foreign = False
+                    continue
+                if in_foreign:
+                    foreign_lines.append(stripped)
 
-        self.assertEqual(result, mock_layer_data)
-        mock_gcode_reader.preReadFromStream.assert_called_once()
-        mock_gcode_reader.readFromStream.assert_called_once()
+            # Foreign extruder moves should still reference X50-60 Y50-60
+            for fl in foreign_lines:
+                if fl.startswith("G1 ") and "E" in fl:
+                    x = BrickLayers._getValue(fl, "X")
+                    y = BrickLayers._getValue(fl, "Y")
+                    if x is not None:
+                        self.assertGreaterEqual(
+                            float(x), 50,
+                            f"Foreign extruder X shifted: {fl}",
+                        )
+                    if y is not None:
+                        self.assertGreaterEqual(
+                            float(y), 50,
+                            f"Foreign extruder Y shifted: {fl}",
+                        )
+
+    def test_tool_changes_preserved(self):
+        """T0 and T1 commands must appear in output."""
+        gcode = self._make_dual_extruder_gcode()
+        result = self.bl._execute(list(gcode))
+
+        for block_idx in range(1, len(result)):
+            block = result[block_idx]
+            self.assertIn("T1", block,
+                          f"T1 missing from block {block_idx}")
+            self.assertIn("T0", block,
+                          f"T0 missing from block {block_idx}")
+
+    def test_primary_extruder_walls_processed(self):
+        """Primary extruder (T0) wall loops should still be processed."""
+        gcode = self._make_dual_extruder_gcode()
+        result = self.bl._execute(list(gcode))
+
+        # Check that at least one block has BrickLayers markers
+        has_brick = any("BrickLayers" in block for block in result)
+        self.assertTrue(has_brick, "BrickLayers should process T0 walls")
+
+    def test_no_negative_e_primary_extruder(self):
+        """Primary extruder extrusion moves should not have negative E."""
+        gcode = self._make_dual_extruder_gcode()
+        result = self.bl._execute(list(gcode))
+
+        for block_idx, block in enumerate(result):
+            if block_idx == 0:
+                continue
+            in_foreign = False
+            for line in block.split("\n"):
+                stripped = line.strip()
+                if stripped == "T1":
+                    in_foreign = True
+                    continue
+                if stripped == "T0":
+                    in_foreign = False
+                    continue
+                if in_foreign:
+                    continue
+                # Skip BrickLayers retract/unretract
+                if ";BrickLayers" in stripped:
+                    continue
+                if stripped.startswith("G1 "):
+                    e = BrickLayers._getValue(stripped, "E")
+                    x = BrickLayers._getValue(stripped, "X")
+                    y = BrickLayers._getValue(stripped, "Y")
+                    if e is not None and (x is not None or y is not None):
+                        self.assertGreaterEqual(
+                            float(e), 0,
+                            f"Negative E on primary extruder in block {block_idx}: {stripped}",
+                        )
 
 
 if __name__ == "__main__":

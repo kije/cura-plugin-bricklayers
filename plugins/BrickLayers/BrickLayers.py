@@ -113,33 +113,6 @@ class BrickLayers(Extension):
             self._onWriteStarted
         )
 
-        # Preview pipeline: process G-code after slicing and update preview
-        self._preview_pending = False
-        self._gcode_processed = False  # True once _execute() has modified gcode_dict
-        self._application.callLater(self._connectSceneSignals)
-
-    # ------------------------------------------------------------------ #
-    # Preview pipeline: scene signal connections
-    # ------------------------------------------------------------------ #
-
-    def _connectSceneSignals(self) -> None:
-        """Deferred connection — scene may not exist at __init__ time."""
-        try:
-            scene = self._application.getController().getScene()
-            scene.getRoot().childrenChanged.connect(
-                self._onSceneChildrenChanged
-            )
-
-            backend = self._application.getBackend()
-            if backend:
-                backend.backendStateChange.connect(
-                    self._onBackendStateChange
-                )
-        except Exception:
-            Logger.logException(
-                "w", "BrickLayers: Failed to connect scene signals"
-            )
-
     # ------------------------------------------------------------------ #
     # Settings injection (same pattern as ArcWelder plugin)
     # ------------------------------------------------------------------ #
@@ -226,164 +199,14 @@ class BrickLayers(Extension):
         return children
 
     # ------------------------------------------------------------------ #
-    # Preview pipeline: scene change detection and job management
-    # ------------------------------------------------------------------ #
-
-    def _onBackendStateChange(self, state) -> None:
-        """Process gcode_dict immediately when slicing finishes.
-
-        BackendState.Done means CuraEngine finished slicing and gcode_dict
-        is fully populated.  We run _execute() right away so gcode_dict
-        contains the final post-processed G-code BEFORE ProcessSlicedLayersJob
-        finishes and the user sees the Preview stage.
-        """
-        from UM.Backend.Backend import BackendState
-
-        if state == BackendState.Done:
-            self._gcode_processed = False
-            self._application.callLater(self._processGcodeDict)
-        elif state in (BackendState.NotStarted, BackendState.Processing):
-            self._preview_pending = False
-            self._gcode_processed = False
-
-    def _processGcodeDict(self) -> None:
-        """Modify gcode_dict with BrickLayers transformations.
-
-        Called via callLater after backendStateChange(Done).  This only
-        modifies the G-code text — no scene/LayerData changes, no
-        FlavorParser, no Qt side effects.
-        """
-        try:
-            global_stack = CuraApplication.getInstance().getGlobalContainerStack()
-            if not global_stack:
-                return
-            if not global_stack.getProperty("brick_layers_enabled", "value"):
-                return
-
-            scene = self._application.getController().getScene()
-            if not hasattr(scene, "gcode_dict"):
-                return
-            gcode_dict = getattr(scene, "gcode_dict")
-            if not gcode_dict:
-                return
-
-            active_build_plate_id = (
-                CuraApplication.getInstance()
-                .getMultiBuildPlateModel()
-                .activeBuildPlate
-            )
-            gcode_list = gcode_dict.get(active_build_plate_id)
-            if not gcode_list:
-                return
-            if _BRICK_LAYERS_MARKER in gcode_list[0]:
-                return
-
-            modified_gcode = self._execute(gcode_list)
-            modified_gcode[0] += _BRICK_LAYERS_MARKER + "\n"
-            gcode_dict[active_build_plate_id] = modified_gcode
-            setattr(scene, "gcode_dict", gcode_dict)
-
-            self._gcode_processed = True
-            Logger.log("d", "BrickLayers: gcode_dict updated with post-processed G-code")
-        except Exception:
-            Logger.logException("w", "BrickLayers: Failed to process gcode_dict")
-
-    def _onSceneChildrenChanged(self, node) -> None:
-        """Called when scene children change.
-
-        After ProcessSlicedLayersJob attaches a LayerData node to the
-        scene, we schedule a deferred LayerData swap to replace the
-        protobuf-based preview with one parsed from our modified G-code.
-        """
-        if self._preview_pending or not self._gcode_processed:
-            return
-
-        scene = self._application.getController().getScene()
-        from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
-        has_layer_data = False
-        for n in DepthFirstIterator(scene.getRoot()):
-            if n.callDecoration("getLayerData"):
-                has_layer_data = True
-                break
-        if not has_layer_data:
-            return
-
-        self._preview_pending = True
-        self._application.callLater(self._swapPreviewLayerData)
-
-    def _swapPreviewLayerData(self) -> None:
-        """Replace protobuf-based LayerData with G-code-parsed LayerData.
-
-        The gcode_dict was already modified by _processGcodeDict.  Here
-        we re-parse it via FlavorParser to get LayerData for the preview.
-
-        To prevent FlavorParser side effects from triggering stopSlicing,
-        we temporarily disconnect CuraEngineBackend's scene listener.
-        """
-        self._preview_pending = False
-
-        try:
-            scene = self._application.getController().getScene()
-            gcode_dict = getattr(scene, "gcode_dict", None)
-            if not gcode_dict:
-                return
-
-            active_build_plate_id = (
-                CuraApplication.getInstance()
-                .getMultiBuildPlateModel()
-                .activeBuildPlate
-            )
-            gcode_list = gcode_dict.get(active_build_plate_id)
-            if not gcode_list:
-                return
-
-            # Re-parse modified G-code into LayerData
-            new_layer_data = self._reparse_gcode(gcode_list)
-            if new_layer_data is None:
-                Logger.log("w", "BrickLayers: Failed to parse modified G-code for preview")
-                return
-
-            # Replace LayerData on the existing scene node
-            from cura.LayerDataDecorator import LayerDataDecorator
-            from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
-
-            target_node = None
-            for n in DepthFirstIterator(scene.getRoot()):
-                if n.callDecoration("getLayerData"):
-                    target_node = n
-                    break
-
-            if target_node is None:
-                Logger.log("w", "BrickLayers: No LayerData node found for preview update")
-                return
-
-            old_decorator = target_node.getDecorator(LayerDataDecorator)
-            if old_decorator:
-                old_decorator.setLayerData(new_layer_data)
-            else:
-                decorator = LayerDataDecorator()
-                decorator.setLayerData(new_layer_data)
-                target_node.addDecorator(decorator)
-
-            # Notify SimulationView to recalculate layers/paths
-            view = self._application.getController().getActiveView()
-            if hasattr(view, "resetLayerData"):
-                view.resetLayerData()
-
-            Logger.log("d", "BrickLayers: Preview LayerData swapped successfully")
-
-        except Exception:
-            Logger.logException("w", "BrickLayers: Preview LayerData swap failed")
-
-    # ------------------------------------------------------------------ #
-    # GCode pipeline hook (fallback for immediate save before preview)
+    # GCode pipeline hook
     # ------------------------------------------------------------------ #
 
     def _onWriteStarted(self, output_device) -> None:
-        """Fallback: if the preview job hasn't processed gcode_dict yet
-        (e.g. user clicked Save immediately after slicing), process
-        synchronously now.  If the preview job already ran, the marker
-        is present and we skip."""
+        """Post-process gcode_dict before saving to file.
+
+        If already processed (marker present), skip.
+        """
         global_stack = CuraApplication.getInstance().getGlobalContainerStack()
         if not global_stack:
             return
@@ -403,131 +226,13 @@ class BrickLayers(Extension):
         if not gcode_list:
             return
 
-        # Already processed by preview job — nothing to do
         if _BRICK_LAYERS_MARKER in gcode_list[0]:
             return
 
-        # Synchronous fallback processing
         gcode_list = self._execute(gcode_list)
         gcode_list[0] += _BRICK_LAYERS_MARKER + "\n"
         gcode_dict[active_build_plate_id] = gcode_list
         setattr(scene, "gcode_dict", gcode_dict)
-
-        self._refreshPreviewLayerData(scene, gcode_list)
-
-    def _reparse_gcode(self, gcode_list: List[str]):
-        """Parse modified G-code into LayerData using GCodeReader/FlavorParser.
-
-        FlavorParser.processGCodeStream() has several destructive side effects
-        when used for preview refresh (it's designed for loading .gcode files):
-        1. Overwrites scene.gcode_dict
-        2. Shows a "G-code Details" caution message
-        3. Sets backend state to Disabled (resets "sliced" state)
-        4. Emits signals that trigger CuraEngineBackend.stopSlicing()
-
-        We suppress ALL of these by:
-        - Saving/restoring gcode_dict and backend state
-        - Suppressing the caution message preference
-        - Temporarily disconnecting CuraEngineBackend._onSceneChanged
-          to prevent stopSlicing from being triggered
-        """
-        gcode_reader = PluginRegistry.getInstance().getPluginObject("GCodeReader")
-        if gcode_reader is None:
-            Logger.log("w", "BrickLayers: GCodeReader plugin not available")
-            return None
-
-        app = CuraApplication.getInstance()
-        scene = app.getController().getScene()
-        backend = app.getBackend()
-
-        # Save state that FlavorParser will clobber
-        saved_gcode_dict = getattr(scene, "gcode_dict", None)
-        saved_show_caution = app.getPreferences().getValue(
-            "gcodereader/show_caution"
-        )
-
-        # Temporarily disconnect the backend's scene change listener
-        # to prevent FlavorParser from triggering stopSlicing()
-        backend_disconnected = False
-        if backend is not None and hasattr(backend, "_onSceneChanged"):
-            try:
-                scene.sceneChanged.disconnect(backend._onSceneChanged)
-                backend_disconnected = True
-            except Exception:
-                pass  # May already be disconnected
-
-        try:
-            # Suppress the "G-code Details" caution message
-            app.getPreferences().setValue("gcodereader/show_caution", False)
-
-            gcode_stream = "\n".join(gcode_list)
-            gcode_reader.preReadFromStream(gcode_stream)
-            result_node = gcode_reader.readFromStream(
-                gcode_stream, "bricklayers_preview"
-            )
-        finally:
-            # Restore all clobbered state
-            if saved_gcode_dict is not None:
-                scene.gcode_dict = saved_gcode_dict
-            app.getPreferences().setValue(
-                "gcodereader/show_caution", saved_show_caution
-            )
-            # FlavorParser sets backend to Disabled; restore to Done
-            if backend is not None:
-                from UM.Backend.Backend import BackendState
-                backend.setState(BackendState.Done)
-            # Reconnect the backend's scene listener
-            if backend_disconnected:
-                scene.sceneChanged.connect(backend._onSceneChanged)
-
-        if result_node is None:
-            return None
-        return result_node.callDecoration("getLayerData")
-
-    def _refreshPreviewLayerData(self, scene, gcode_list: List[str]) -> None:
-        """Refresh the preview layer data with modified G-code.
-
-        Used as a synchronous fallback from _onWriteStarted.
-        Delegates to _reparse_gcode which handles all FlavorParser side effects.
-        """
-        if getattr(self, "_refreshing_preview", False):
-            return
-        self._refreshing_preview = True
-        try:
-            from cura.LayerDataDecorator import LayerDataDecorator
-            from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
-
-            target_node = None
-            for node in DepthFirstIterator(scene.getRoot()):
-                if node.callDecoration("getLayerData"):
-                    target_node = node
-                    break
-
-            if target_node is None:
-                return
-
-            new_layer_data = self._reparse_gcode(gcode_list)
-            if new_layer_data is None:
-                return
-
-            old_decorator = target_node.getDecorator(LayerDataDecorator)
-            if old_decorator:
-                old_decorator.setLayerData(new_layer_data)
-            else:
-                decorator = LayerDataDecorator()
-                decorator.setLayerData(new_layer_data)
-                target_node.addDecorator(decorator)
-
-            view = Application.getInstance().getController().getActiveView()
-            if hasattr(view, "resetLayerData"):
-                view.resetLayerData()
-
-            Logger.log("d", "BrickLayers: Preview layer data refreshed")
-
-        except Exception:
-            Logger.logException("w", "BrickLayers: Failed to refresh preview layer data")
-        finally:
-            self._refreshing_preview = False
 
     # ------------------------------------------------------------------ #
     # GCode transformation logic
@@ -594,16 +299,12 @@ class BrickLayers(Extension):
         if not relative_extrusion:
             # Scan data blocks before the first processable layer to find
             # the E position at the start of processing.
+            # Uses _scan_primary_e to ignore foreign extruder lines.
             for index in range(len(data)):
                 layer_num = self._get_layer_number(data[index])
                 if layer_num is not None and layer_num >= start_layer_gcode:
                     break
-                for line in data[index].split("\n"):
-                    stripped = line.strip()
-                    if stripped.startswith("G1 "):
-                        e = self._getValue(stripped, "E")
-                        if e is not None:
-                            original_e = float(e)
+                original_e = self._scan_primary_e(data[index], original_e)
             output_e = original_e
 
         for index in range(len(data)):
@@ -613,35 +314,23 @@ class BrickLayers(Extension):
             if layer_num is None or layer_num < 0:
                 # Non-layer block: track E for absolute mode
                 if not relative_extrusion:
-                    for line in layer_gcode.split("\n"):
-                        stripped = line.strip()
-                        if stripped.startswith("G1 "):
-                            e = self._getValue(stripped, "E")
-                            if e is not None:
-                                original_e = float(e)
-                                output_e = float(e)
+                    e = self._scan_primary_e(layer_gcode, original_e)
+                    original_e = e
+                    output_e = e
                 continue
             if layer_num < start_layer_gcode or layer_num > end_layer_gcode:
                 # Non-processed layer: track E for absolute mode
                 if not relative_extrusion:
-                    for line in layer_gcode.split("\n"):
-                        stripped = line.strip()
-                        if stripped.startswith("G1 "):
-                            e = self._getValue(stripped, "E")
-                            if e is not None:
-                                original_e = float(e)
-                                output_e = float(e)
+                    e = self._scan_primary_e(layer_gcode, original_e)
+                    original_e = e
+                    output_e = e
                 continue
 
             # For absolute mode: find the original end E BEFORE modifying
             original_layer_end_e = original_e
             if not relative_extrusion:
-                for line in layer_gcode.split("\n"):
-                    stripped = line.strip()
-                    if stripped.startswith("G1 "):
-                        e = self._getValue(stripped, "E")
-                        if e is not None:
-                            original_layer_end_e = float(e)
+                original_layer_end_e = self._scan_primary_e(
+                    layer_gcode, original_e)
 
             is_first_brick = (layer_num == start_layer_gcode)
             is_last_brick = (layer_num == end_layer_gcode)
@@ -736,6 +425,41 @@ class BrickLayers(Extension):
             line_parts.append(comment)
 
         return " ".join(line_parts)
+
+    @staticmethod
+    def _scan_primary_e(block: str, current_e: float) -> float:
+        """Scan a G-code block for E values, ignoring foreign extruder lines.
+
+        Returns the last E value seen on the primary extruder's lines.
+        Foreign extruder lines (between T<other> and T<primary>) are skipped.
+        """
+        primary_extruder = None
+        in_foreign = False
+        last_e = current_e
+
+        for line in block.split("\n"):
+            stripped = line.strip()
+
+            tool_match = re.match(r'^T(\d+)\b', stripped)
+            if tool_match:
+                tool_num = int(tool_match.group(1))
+                if primary_extruder is None:
+                    primary_extruder = tool_num
+                elif tool_num != primary_extruder:
+                    in_foreign = True
+                else:
+                    in_foreign = False
+                continue
+
+            if in_foreign:
+                continue
+
+            if stripped.startswith("G1 "):
+                e = BrickLayers._getValue(stripped, "E")
+                if e is not None:
+                    last_e = float(e)
+
+        return last_e
 
     # ------------------------------------------------------------------ #
     # GCode analysis
@@ -920,8 +644,57 @@ class BrickLayers(Extension):
         other_lines: List[str] = []
         in_target_section = False
 
+        # Multi-extruder support: detect tool changes (T0, T1, ...) and
+        # pass foreign-extruder G-code through unchanged.  The first
+        # extruder seen is the "primary" one whose walls we process.
+        primary_extruder = None
+        in_foreign_extruder = False
+
         for line in lines:
             stripped = line.strip()
+
+            # Detect tool change commands: T0, T1, T2, ...
+            tool_match = re.match(r'^T(\d+)\b', stripped)
+            if tool_match:
+                tool_num = int(tool_match.group(1))
+                if primary_extruder is None:
+                    # First tool command — this is the primary extruder
+                    primary_extruder = tool_num
+                    other_lines.append(line)
+                    continue
+
+                if tool_num != primary_extruder:
+                    # Switching to a foreign extruder — flush any open
+                    # wall section and pass everything through unchanged.
+                    if in_target_section:
+                        if current_loop and current_loop.has_extrusion:
+                            current_loops.append(current_loop)
+                        trailing = []
+                        if current_loop and not current_loop.has_extrusion:
+                            trailing.extend(current_loop.prefix_lines)
+                            trailing.extend(current_loop.body_lines)
+                        if current_loops:
+                            if other_lines:
+                                sections.append(("other", list(other_lines)))
+                                other_lines = []
+                            sections.append(("loops", list(current_loops), current_type))
+                        other_lines.extend(trailing)
+                        current_loops = []
+                        current_loop = None
+                        in_target_section = False
+                    in_foreign_extruder = True
+                    other_lines.append(line)
+                    continue
+                else:
+                    # Switching back to the primary extruder
+                    in_foreign_extruder = False
+                    other_lines.append(line)
+                    continue
+
+            # While a foreign extruder is active, pass all lines through
+            if in_foreign_extruder:
+                other_lines.append(line)
+                continue
 
             if stripped.startswith(";TYPE:"):
                 new_type = stripped[6:]
@@ -1374,10 +1147,14 @@ class BrickLayers(Extension):
 
     def _convert_to_relative_e(self, layer_gcode: str,
                                 start_e: float) -> Tuple[str, float]:
-        """Convert all G1 E values in a layer from absolute to relative deltas.
+        """Convert G1 E values in a layer from absolute to relative deltas.
 
         Each absolute E value is replaced with the delta from the previous E.
         This makes loop reordering safe since deltas are order-independent.
+
+        Only converts the primary extruder's E values. Lines belonging to
+        a foreign extruder (between T<other> and T<primary>) pass through
+        unchanged so their E tracking is not corrupted.
 
         Returns (converted_gcode, original_end_e).
         """
@@ -1386,8 +1163,31 @@ class BrickLayers(Extension):
         last_e = start_e
         original_end_e = start_e
 
+        # Track tool changes: only convert primary extruder's E values
+        primary_extruder = None
+        in_foreign_extruder = False
+
         for line in lines:
             stripped = line.strip()
+
+            # Detect tool changes
+            tool_match = re.match(r'^T(\d+)\b', stripped)
+            if tool_match:
+                tool_num = int(tool_match.group(1))
+                if primary_extruder is None:
+                    primary_extruder = tool_num
+                elif tool_num != primary_extruder:
+                    in_foreign_extruder = True
+                else:
+                    in_foreign_extruder = False
+                result.append(line)
+                continue
+
+            # Foreign extruder lines pass through unchanged
+            if in_foreign_extruder:
+                result.append(line)
+                continue
+
             if stripped.startswith("G1 "):
                 e_val = self._getValue(stripped, "E")
                 if e_val is not None:
@@ -1408,13 +1208,39 @@ class BrickLayers(Extension):
         starting from start_e. This avoids needing M83/M82/G92 commands which
         some firmware (e.g. Ultimaker S5) does not support.
 
+        Only converts the primary extruder's E values. Foreign extruder
+        lines pass through unchanged.
+
         Returns (converted_lines, final_e_position).
         """
         result = []
         current_e = start_e
 
+        # Track tool changes: only convert primary extruder's E values
+        primary_extruder = None
+        in_foreign_extruder = False
+
         for line in lines:
             stripped = line.strip()
+
+            # Detect tool changes
+            tool_match = re.match(r'^T(\d+)\b', stripped)
+            if tool_match:
+                tool_num = int(tool_match.group(1))
+                if primary_extruder is None:
+                    primary_extruder = tool_num
+                elif tool_num != primary_extruder:
+                    in_foreign_extruder = True
+                else:
+                    in_foreign_extruder = False
+                result.append(line)
+                continue
+
+            # Foreign extruder lines pass through unchanged
+            if in_foreign_extruder:
+                result.append(line)
+                continue
+
             if stripped.startswith("G1 "):
                 e_val = self._getValue(stripped, "E")
                 if e_val is not None:
