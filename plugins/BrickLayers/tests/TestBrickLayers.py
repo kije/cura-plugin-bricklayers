@@ -7,6 +7,7 @@
 
 import importlib.util
 import os
+import re
 import sys
 import unittest
 from unittest.mock import MagicMock
@@ -2245,6 +2246,124 @@ class TestDualExtruder(unittest.TestCase):
                             float(e), 0,
                             f"Negative E on primary extruder in block {block_idx}: {stripped}",
                         )
+
+
+    def _make_implicit_primary_gcode(self):
+        """Create G-code where T0 is implicitly active at layer start.
+
+        This mirrors real dual-extruder Cura output: T1 starts in the
+        header (for support), previous layers end with T0, so each layer
+        starts with T0 active (no explicit T0 at layer start).  The first
+        T command in each layer is T1 (switching to support mid-layer).
+        """
+        header = ";Generated with Cura\nM82\nG28\nT1\nG92 E0\n"
+        # Pre-layer block: initial T1 support, then T0 starts model
+        pre_layer = (
+            ";LAYER:-1\n"
+            ";TYPE:SUPPORT\n"
+            "G0 F9000 X50 Y50 Z0.2\n"
+            "G1 F800 X60 Y50 E0.5\n"
+            "T0\n"
+            "G92 E0\n"
+            ";TYPE:SKIRT\n"
+            "G0 F9000 X0 Y0 Z0.2\n"
+            "G1 F1200 X5 Y0 E0.3\n"
+        )
+        # Layer 0: T0 active at start (implicit), T1 mid-layer for support
+        layer0 = (
+            ";LAYER:0\n"
+            "G0 F9000 X10 Y10 Z0.2\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E0.5\nG1 X20 Y20 E1.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E1.5\nG1 X18 Y18 E2.0\n"
+            ";TYPE:SUPPORT\n"
+            "T1\n"
+            "G92 E0\n"
+            "G0 F9000 X50 Y50\n"
+            "G1 F800 X60 Y50 E0.5\nG1 X60 Y60 E1.0\n"
+            "T0\n"
+        )
+        # Layer 1: same structure
+        layer1 = (
+            ";LAYER:1\n"
+            "G0 F9000 X10 Y10 Z0.4\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E2.5\nG1 X20 Y20 E3.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E3.5\nG1 X18 Y18 E4.0\n"
+            ";TYPE:SUPPORT\n"
+            "T1\n"
+            "G92 E0\n"
+            "G0 F9000 X50 Y50\n"
+            "G1 F800 X60 Y50 E0.5\nG1 X60 Y60 E1.0\n"
+            "T0\n"
+        )
+        return [header, pre_layer, layer0, layer1]
+
+    def test_implicit_primary_extruder_walls_processed(self):
+        """When T0 is implicitly active at layer start, its walls must still
+        be processed (shifted by BrickLayers)."""
+        gcode = self._make_implicit_primary_gcode()
+        result = self.bl._execute(list(gcode))
+        has_brick = any("BrickLayers" in block for block in result)
+        self.assertTrue(has_brick,
+                        "BrickLayers should process T0 walls even when T0 "
+                        "is only implicitly active at layer start")
+
+    def test_implicit_primary_no_t1_in_wall_section(self):
+        """T1 commands must NOT appear inside WALL-INNER sections.
+
+        This was the original bug: BrickLayers treated T1 as the primary
+        extruder, so T1's support lines got mixed into wall sections."""
+        gcode = self._make_implicit_primary_gcode()
+        result = self.bl._execute(list(gcode))
+
+        for block_idx, block in enumerate(result):
+            in_wall = False
+            for line in block.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(";TYPE:WALL"):
+                    in_wall = True
+                elif stripped.startswith(";TYPE:") and "WALL" not in stripped:
+                    in_wall = False
+                elif stripped.startswith(";BrickLayers"):
+                    continue
+                elif in_wall and re.match(r'^T\d+\b', stripped):
+                    self.fail(
+                        f"Tool change '{stripped}' found inside wall section "
+                        f"in block {block_idx}")
+
+    def test_implicit_primary_support_coords_unchanged(self):
+        """Support extruder (T1) coordinates (X50-60) must not be shifted."""
+        gcode = self._make_implicit_primary_gcode()
+        result = self.bl._execute(list(gcode))
+
+        for block_idx, block in enumerate(result):
+            in_foreign = False
+            for line in block.split("\n"):
+                stripped = line.strip()
+                if stripped == "T1":
+                    in_foreign = True
+                    continue
+                if stripped == "T0":
+                    in_foreign = False
+                    continue
+                if in_foreign and stripped.startswith("G1 ") and "E" in stripped:
+                    x = BrickLayers._getValue(stripped, "X")
+                    y = BrickLayers._getValue(stripped, "Y")
+                    if x is not None:
+                        self.assertGreaterEqual(
+                            float(x), 50,
+                            f"Support extruder X shifted in block {block_idx}: "
+                            f"{stripped}")
+                    if y is not None:
+                        self.assertGreaterEqual(
+                            float(y), 50,
+                            f"Support extruder Y shifted in block {block_idx}: "
+                            f"{stripped}")
 
 
 if __name__ == "__main__":

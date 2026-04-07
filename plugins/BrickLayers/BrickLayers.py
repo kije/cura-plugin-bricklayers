@@ -329,6 +329,18 @@ class BrickLayers(Extension):
         start_layer_gcode = start_layer - 1
         layers_modified = 0
 
+        # Track the active extruder across layers.  In dual-extruder setups
+        # (e.g. T0=model, T1=support), the extruder active at the START of
+        # a layer is determined by the last T command in the preceding blocks.
+        # Lines before any T command belong to this extruder.  Scan headers
+        # and early blocks to find the initial active extruder.
+        active_extruder = None  # type: Optional[int]
+        for block in data:
+            t = self._scan_last_tool(block)
+            if t is not None:
+                active_extruder = t
+                break
+
         # For absolute extrusion mode: track TWO E positions across layers:
         # - original_e: tracks slicer's original E values (for converting
         #   input layers from absolute to relative)
@@ -346,7 +358,8 @@ class BrickLayers(Extension):
                 layer_num = self._get_layer_number(data[index])
                 if layer_num is not None and layer_num >= start_layer_gcode:
                     break
-                original_e = self._scan_primary_e(data[index], original_e)
+                original_e = self._scan_primary_e(
+                    data[index], original_e, active_extruder)
             output_e = original_e
 
         for index in range(len(data)):
@@ -354,25 +367,33 @@ class BrickLayers(Extension):
 
             layer_num = self._get_layer_number(layer_gcode)
             if layer_num is None or layer_num < 0:
-                # Non-layer block: track E for absolute mode
+                # Non-layer block: track E and active extruder
                 if not relative_extrusion:
-                    e = self._scan_primary_e(layer_gcode, original_e)
+                    e = self._scan_primary_e(
+                        layer_gcode, original_e, active_extruder)
                     original_e = e
                     output_e = e
+                t = self._scan_last_tool(layer_gcode)
+                if t is not None:
+                    active_extruder = t
                 continue
             if layer_num < start_layer_gcode or layer_num > end_layer_gcode:
-                # Non-processed layer: track E for absolute mode
+                # Non-processed layer: track E and active extruder
                 if not relative_extrusion:
-                    e = self._scan_primary_e(layer_gcode, original_e)
+                    e = self._scan_primary_e(
+                        layer_gcode, original_e, active_extruder)
                     original_e = e
                     output_e = e
+                t = self._scan_last_tool(layer_gcode)
+                if t is not None:
+                    active_extruder = t
                 continue
 
             # For absolute mode: find the original end E BEFORE modifying
             original_layer_end_e = original_e
             if not relative_extrusion:
                 original_layer_end_e = self._scan_primary_e(
-                    layer_gcode, original_e)
+                    layer_gcode, original_e, active_extruder)
 
             is_first_brick = (layer_num == start_layer_gcode)
             is_last_brick = (layer_num == end_layer_gcode)
@@ -391,7 +412,8 @@ class BrickLayers(Extension):
                 extrusion_multiplier, is_first_brick, is_last_brick,
                 target_types, relative_extrusion,
                 retract_length, retract_speed, travel_speed,
-                original_e, output_e
+                original_e, output_e,
+                active_extruder
             )
 
             if new_layer is not None:
@@ -405,7 +427,7 @@ class BrickLayers(Extension):
                 # Insert a G0 travel to bridge the gap.
                 self._fix_next_block_position(data, index, travel_speed)
 
-            # Update E tracking for the next layer
+            # Update E tracking and active extruder for the next layer
             if not relative_extrusion:
                 original_e = original_layer_end_e
                 if new_layer is not None:
@@ -414,6 +436,13 @@ class BrickLayers(Extension):
                     # Layer wasn't modified — original E values pass through
                     # unchanged, so output_e must match original_e
                     output_e = original_layer_end_e
+
+            # Track the last T command in this layer for next layer's
+            # active_extruder (use original gcode to avoid BrickLayers
+            # injected lines which never contain T commands)
+            t = self._scan_last_tool(layer_gcode)
+            if t is not None:
+                active_extruder = t
 
         Logger.log("d", "BrickLayers: Modified %d layers (layers %d-%d, z_shift=%.3fmm)",
                    layers_modified, start_layer_gcode, end_layer_gcode, z_shift)
@@ -469,13 +498,28 @@ class BrickLayers(Extension):
         return " ".join(line_parts)
 
     @staticmethod
-    def _scan_primary_e(block: str, current_e: float) -> float:
+    def _scan_last_tool(block: str) -> Optional[int]:
+        """Return the last T command number in a G-code block, or None."""
+        last_tool = None
+        for line in block.split("\n"):
+            m = re.match(r'^T(\d+)\b', line.strip())
+            if m:
+                last_tool = int(m.group(1))
+        return last_tool
+
+    @staticmethod
+    def _scan_primary_e(block: str, current_e: float,
+                        active_extruder: Optional[int] = None) -> float:
         """Scan a G-code block for E values, ignoring foreign extruder lines.
 
         Returns the last E value seen on the primary extruder's lines.
         Foreign extruder lines (between T<other> and T<primary>) are skipped.
+
+        active_extruder: the extruder number active at the START of this block
+        (from tracking T commands across previous blocks). Lines before any T
+        command belong to this extruder. If None, falls back to treating lines
+        before the first T as primary.
         """
-        primary_extruder = None
         in_foreign = False
         last_e = current_e
 
@@ -485,12 +529,9 @@ class BrickLayers(Extension):
             tool_match = re.match(r'^T(\d+)\b', stripped)
             if tool_match:
                 tool_num = int(tool_match.group(1))
-                if primary_extruder is None:
-                    primary_extruder = tool_num
-                elif tool_num != primary_extruder:
-                    in_foreign = True
-                else:
-                    in_foreign = False
+                if active_extruder is not None:
+                    in_foreign = (tool_num != active_extruder)
+                # If active_extruder is None (single extruder), never mark foreign
                 continue
 
             if in_foreign:
@@ -619,7 +660,8 @@ class BrickLayers(Extension):
                        retract_length: float, retract_speed: float,
                        travel_speed: float,
                        layer_start_e: float = 0.0,
-                       output_start_e: float = 0.0
+                       output_start_e: float = 0.0,
+                       active_extruder: Optional[int] = None
                        ) -> Tuple[Optional[str], float]:
 
         # For absolute extrusion mode: convert the entire layer to relative E
@@ -628,7 +670,7 @@ class BrickLayers(Extension):
         original_end_e = None
         if not relative_extrusion:
             layer_gcode, original_end_e = self._convert_to_relative_e(
-                layer_gcode, layer_start_e)
+                layer_gcode, layer_start_e, active_extruder)
 
         # After conversion, always process using relative extrusion logic
         effective_relative = True
@@ -687,9 +729,10 @@ class BrickLayers(Extension):
         in_target_section = False
 
         # Multi-extruder support: detect tool changes (T0, T1, ...) and
-        # pass foreign-extruder G-code through unchanged.  The first
-        # extruder seen is the "primary" one whose walls we process.
-        primary_extruder = None
+        # pass foreign-extruder G-code through unchanged.
+        # active_extruder is the extruder active at the START of this layer
+        # (tracked across layers in _execute). Lines before any T command
+        # belong to this extruder. A T command switches to a different extruder.
         in_foreign_extruder = False
 
         for line in lines:
@@ -699,13 +742,8 @@ class BrickLayers(Extension):
             tool_match = re.match(r'^T(\d+)\b', stripped)
             if tool_match:
                 tool_num = int(tool_match.group(1))
-                if primary_extruder is None:
-                    # First tool command — this is the primary extruder
-                    primary_extruder = tool_num
-                    other_lines.append(line)
-                    continue
 
-                if tool_num != primary_extruder:
+                if active_extruder is not None and tool_num != active_extruder:
                     # Switching to a foreign extruder — flush any open
                     # wall section and pass everything through unchanged.
                     if in_target_section:
@@ -1032,7 +1070,7 @@ class BrickLayers(Extension):
         # (original slicer E) so E values are continuous across layers.
         if not relative_extrusion:
             output_lines, actual_end_e = self._convert_to_absolute_e(
-                output_lines, output_start_e)
+                output_lines, output_start_e, active_extruder)
             return "\n".join(output_lines), actual_end_e
 
         return "\n".join(output_lines), output_start_e
@@ -1188,7 +1226,9 @@ class BrickLayers(Extension):
                     return
 
     def _convert_to_relative_e(self, layer_gcode: str,
-                                start_e: float) -> Tuple[str, float]:
+                                start_e: float,
+                                active_extruder: Optional[int] = None
+                                ) -> Tuple[str, float]:
         """Convert G1 E values in a layer from absolute to relative deltas.
 
         Each absolute E value is replaced with the delta from the previous E.
@@ -1198,6 +1238,8 @@ class BrickLayers(Extension):
         a foreign extruder (between T<other> and T<primary>) pass through
         unchanged so their E tracking is not corrupted.
 
+        active_extruder: the extruder number active at the START of this layer.
+
         Returns (converted_gcode, original_end_e).
         """
         lines = layer_gcode.split("\n")
@@ -1206,7 +1248,6 @@ class BrickLayers(Extension):
         original_end_e = start_e
 
         # Track tool changes: only convert primary extruder's E values
-        primary_extruder = None
         in_foreign_extruder = False
 
         for line in lines:
@@ -1216,12 +1257,9 @@ class BrickLayers(Extension):
             tool_match = re.match(r'^T(\d+)\b', stripped)
             if tool_match:
                 tool_num = int(tool_match.group(1))
-                if primary_extruder is None:
-                    primary_extruder = tool_num
-                elif tool_num != primary_extruder:
-                    in_foreign_extruder = True
-                else:
-                    in_foreign_extruder = False
+                if active_extruder is not None:
+                    in_foreign_extruder = (tool_num != active_extruder)
+                # If active_extruder is None, no T tracking — convert all
                 result.append(line)
                 continue
 
@@ -1243,7 +1281,9 @@ class BrickLayers(Extension):
         return "\n".join(result), original_end_e
 
     def _convert_to_absolute_e(self, lines: List[str],
-                                start_e: float) -> Tuple[List[str], float]:
+                                start_e: float,
+                                active_extruder: Optional[int] = None
+                                ) -> Tuple[List[str], float]:
         """Convert relative E values back to absolute by accumulating deltas.
 
         Takes output lines with relative E and returns lines with absolute E,
@@ -1253,13 +1293,14 @@ class BrickLayers(Extension):
         Only converts the primary extruder's E values. Foreign extruder
         lines pass through unchanged.
 
+        active_extruder: the extruder number active at the START of this layer.
+
         Returns (converted_lines, final_e_position).
         """
         result = []
         current_e = start_e
 
         # Track tool changes: only convert primary extruder's E values
-        primary_extruder = None
         in_foreign_extruder = False
 
         for line in lines:
@@ -1269,12 +1310,9 @@ class BrickLayers(Extension):
             tool_match = re.match(r'^T(\d+)\b', stripped)
             if tool_match:
                 tool_num = int(tool_match.group(1))
-                if primary_extruder is None:
-                    primary_extruder = tool_num
-                elif tool_num != primary_extruder:
-                    in_foreign_extruder = True
-                else:
-                    in_foreign_extruder = False
+                if active_extruder is not None:
+                    in_foreign_extruder = (tool_num != active_extruder)
+                # If active_extruder is None, no T tracking — convert all
                 result.append(line)
                 continue
 
