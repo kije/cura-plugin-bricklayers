@@ -18,7 +18,7 @@ pub mod proto {
         tonic::include_proto!("cura.plugins.slots.broadcast.v0");
     }
     pub mod gcode_paths {
-        tonic::include_proto!("cura.plugins.slots.gcode_paths.v0");
+        tonic::include_proto!("cura.plugins.slots.gcode_paths.v0.modify");
     }
 }
 

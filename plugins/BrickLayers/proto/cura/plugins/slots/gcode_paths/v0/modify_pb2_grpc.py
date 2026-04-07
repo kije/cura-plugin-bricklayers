@@ -35,7 +35,7 @@ class GCodePathsModifyServiceStub(object):
             channel: A grpc.Channel.
         """
         self.Call = channel.unary_unary(
-                '/cura.plugins.slots.gcode_paths.v0.GCodePathsModifyService/Call',
+                '/cura.plugins.slots.gcode_paths.v0.modify.GCodePathsModifyService/Call',
                 request_serializer=cura_dot_plugins_dot_slots_dot_gcode__paths_dot_v0_dot_modify__pb2.CallRequest.SerializeToString,
                 response_deserializer=cura_dot_plugins_dot_slots_dot_gcode__paths_dot_v0_dot_modify__pb2.CallResponse.FromString,
                 _registered_method=True)
@@ -60,9 +60,9 @@ def add_GCodePathsModifyServiceServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'cura.plugins.slots.gcode_paths.v0.GCodePathsModifyService', rpc_method_handlers)
+            'cura.plugins.slots.gcode_paths.v0.modify.GCodePathsModifyService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('cura.plugins.slots.gcode_paths.v0.GCodePathsModifyService', rpc_method_handlers)
+    server.add_registered_method_handlers('cura.plugins.slots.gcode_paths.v0.modify.GCodePathsModifyService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -83,7 +83,7 @@ class GCodePathsModifyService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/cura.plugins.slots.gcode_paths.v0.GCodePathsModifyService/Call',
+            '/cura.plugins.slots.gcode_paths.v0.modify.GCodePathsModifyService/Call',
             cura_dot_plugins_dot_slots_dot_gcode__paths_dot_v0_dot_modify__pb2.CallRequest.SerializeToString,
             cura_dot_plugins_dot_slots_dot_gcode__paths_dot_v0_dot_modify__pb2.CallResponse.FromString,
             options,

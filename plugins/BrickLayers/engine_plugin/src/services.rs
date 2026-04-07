@@ -50,11 +50,11 @@ impl BrickSettings {
         self.inner.lock().unwrap()
     }
 
-    fn parse_settings(&self, settings: &proto::v0::Settings) {
+    fn parse_settings(&self, settings: &proto::broadcast::Settings) {
         let mut s = self.inner.lock().unwrap();
-        for setting in &settings.settings {
-            let val = String::from_utf8_lossy(&setting.value).trim().to_string();
-            match setting.name.as_str() {
+        for (name, value_bytes) in &settings.settings {
+            let val = String::from_utf8_lossy(value_bytes).trim().to_string();
+            match name.as_str() {
                 "brick_layers_enabled" => {
                     s.enabled = matches!(val.as_str(), "true" | "1" | "True" | "yes");
                 }

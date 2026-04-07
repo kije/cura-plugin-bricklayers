@@ -25,17 +25,17 @@ _sym_db = _symbol_database.Default()
 from cura.plugins.v0 import gcode_path_pb2 as cura_dot_plugins_dot_v0_dot_gcode__path__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n.cura/plugins/slots/gcode_paths/v0/modify.proto\x12!cura.plugins.slots.gcode_paths.v0\x1a cura/plugins/v0/gcode_path.proto\"e\n\x0b\x43\x61llRequest\x12/\n\x0bgcode_paths\x18\x01 \x03(\x0b\x32\x1a.cura.plugins.v0.GCodePath\x12\x13\n\x0b\x65xtruder_nr\x18\x02 \x01(\x03\x12\x10\n\x08layer_nr\x18\x03 \x01(\x03\"?\n\x0c\x43\x61llResponse\x12/\n\x0bgcode_paths\x18\x01 \x03(\x0b\x32\x1a.cura.plugins.v0.GCodePath2\x84\x01\n\x17GCodePathsModifyService\x12i\n\x04\x43\x61ll\x12..cura.plugins.slots.gcode_paths.v0.CallRequest\x1a/.cura.plugins.slots.gcode_paths.v0.CallResponse\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n.cura/plugins/slots/gcode_paths/v0/modify.proto\x12(cura.plugins.slots.gcode_paths.v0.modify\x1a cura/plugins/v0/gcode_path.proto\"e\n\x0b\x43\x61llRequest\x12/\n\x0bgcode_paths\x18\x01 \x03(\x0b\x32\x1a.cura.plugins.v0.GCodePath\x12\x13\n\x0b\x65xtruder_nr\x18\x02 \x01(\x03\x12\x10\n\x08layer_nr\x18\x03 \x01(\x03\"?\n\x0c\x43\x61llResponse\x12/\n\x0bgcode_paths\x18\x01 \x03(\x0b\x32\x1a.cura.plugins.v0.GCodePath2\x92\x01\n\x17GCodePathsModifyService\x12w\n\x04\x43\x61ll\x12\x35.cura.plugins.slots.gcode_paths.v0.modify.CallRequest\x1a\x36.cura.plugins.slots.gcode_paths.v0.modify.CallResponse\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'cura.plugins.slots.gcode_paths.v0.modify_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_CALLREQUEST']._serialized_start=119
-  _globals['_CALLREQUEST']._serialized_end=220
-  _globals['_CALLRESPONSE']._serialized_start=222
-  _globals['_CALLRESPONSE']._serialized_end=285
-  _globals['_GCODEPATHSMODIFYSERVICE']._serialized_start=288
-  _globals['_GCODEPATHSMODIFYSERVICE']._serialized_end=420
+  _globals['_CALLREQUEST']._serialized_start=126
+  _globals['_CALLREQUEST']._serialized_end=227
+  _globals['_CALLRESPONSE']._serialized_start=229
+  _globals['_CALLRESPONSE']._serialized_end=292
+  _globals['_GCODEPATHSMODIFYSERVICE']._serialized_start=295
+  _globals['_GCODEPATHSMODIFYSERVICE']._serialized_end=441
 # @@protoc_insertion_point(module_scope)

@@ -101,30 +101,32 @@ class BroadcastServicer(broadcast_pb2_grpc.BroadcastServiceServicer):
     def _parse_settings(self, settings_msg) -> None:
         if settings_msg is None:
             return
-        for setting in settings_msg.settings:
-            val = setting.value.decode("utf-8", errors="replace").strip()
-            if setting.name == "brick_layers_enabled":
+        # Settings is a map<string, bytes> in the upstream proto
+        settings_map = settings_msg.settings
+        for name, value_bytes in settings_map.items():
+            val = value_bytes.decode("utf-8", errors="replace").strip()
+            if name == "brick_layers_enabled":
                 self._settings.enabled = val.lower() in ("true", "1", "yes")
-            elif setting.name == "brick_layers_start_layer":
+            elif name == "brick_layers_start_layer":
                 try:
                     self._settings.start_layer = max(0, int(float(val)) - 1)
                 except ValueError:
                     pass
-            elif setting.name == "brick_layers_end_layer":
+            elif name == "brick_layers_end_layer":
                 try:
                     self._settings.end_layer = int(float(val))
                 except ValueError:
                     pass
-            elif setting.name == "brick_layers_apply_inner_walls":
+            elif name == "brick_layers_apply_inner_walls":
                 self._settings.apply_inner_walls = val.lower() in ("true", "1", "yes")
-            elif setting.name == "brick_layers_apply_outer_walls":
+            elif name == "brick_layers_apply_outer_walls":
                 self._settings.apply_outer_walls = val.lower() in ("true", "1", "yes")
-            elif setting.name == "brick_layers_extrusion_multiplier":
+            elif name == "brick_layers_extrusion_multiplier":
                 try:
                     self._settings.extrusion_multiplier = float(val)
                 except ValueError:
                     pass
-            elif setting.name == "layer_height":
+            elif name == "layer_height":
                 try:
                     # Cura sends in mm, CuraEngine uses microns
                     self._settings.layer_height = int(float(val) * 1000)

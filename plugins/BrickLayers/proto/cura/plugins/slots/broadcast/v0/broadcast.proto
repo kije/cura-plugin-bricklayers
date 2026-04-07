@@ -2,16 +2,19 @@ syntax = "proto3";
 
 package cura.plugins.slots.broadcast.v0;
 
-import "cura/plugins/v0/settings.proto";
 import "google/protobuf/empty.proto";
 
-service BroadcastService {
-  rpc BroadcastSettings(BroadcastServiceSettingsRequest) returns (google.protobuf.Empty) {}
+message Settings {
+  map<string, bytes> settings = 1;
 }
 
 message BroadcastServiceSettingsRequest {
-  cura.plugins.v0.Settings global_settings = 1;
-  repeated cura.plugins.v0.Settings extruder_settings = 2;
-  repeated cura.plugins.v0.Settings object_settings = 3;
+  Settings global_settings = 1;
+  repeated Settings extruder_settings = 2;
+  repeated Settings object_settings = 3;
   map<string, uint64> limit_to_extruder = 4;
+}
+
+service BroadcastService {
+  rpc BroadcastSettings(BroadcastServiceSettingsRequest) returns (google.protobuf.Empty) {}
 }
