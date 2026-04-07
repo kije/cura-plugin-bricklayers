@@ -981,6 +981,22 @@ class BrickLayers(Extension):
                 if pre_deferred_x is not None and pre_deferred_y is not None:
                     break
 
+        # Ensure the primary extruder is active before emitting deferred
+        # loops.  In dual-extruder layers, the foreign extruder section may
+        # be the last section emitted (e.g. layer ends with T1 support,
+        # no T0 switch-back).  Without this, deferred T0 wall loops would
+        # execute with T1 still active — tracing T0 coordinates on T1.
+        last_tool_in_output = None
+        if active_extruder is not None:
+            for line in reversed(output_lines):
+                m = re.match(r'^T(\d+)\b', line.strip())
+                if m:
+                    last_tool_in_output = int(m.group(1))
+                    break
+            if last_tool_in_output is not None and last_tool_in_output != active_extruder:
+                output_lines.append(
+                    "T%d ;BrickLayers restore primary extruder" % active_extruder)
+
         output_lines.append(
             ";BrickLayers: shifted loops at Z=%.4f (offset +%.3f)" % (shifted_z, z_shift))
 
@@ -1063,6 +1079,14 @@ class BrickLayers(Extension):
         # the nozzle in the expected primed state
         output_lines.append(
             "G1 F%.0f E%.5f ;BrickLayers unretract" % (retract_speed, retract_length))
+
+        # Restore the foreign extruder if the original layer ended with one.
+        # This preserves tool state for the next layer (which may expect
+        # the foreign extruder to be active at its start).
+        if active_extruder is not None and last_tool_in_output is not None \
+                and last_tool_in_output != active_extruder:
+            output_lines.append(
+                "T%d ;BrickLayers restore end-of-layer extruder" % last_tool_in_output)
 
         # For absolute mode: convert relative E values back to absolute
         # so the output uses only G0/G1 commands (no M82/M83/G92 needed).

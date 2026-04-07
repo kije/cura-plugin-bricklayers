@@ -2366,5 +2366,140 @@ class TestDualExtruder(unittest.TestCase):
                             f"{stripped}")
 
 
+    def _make_no_switchback_gcode(self):
+        """Create G-code where layers END with T1 active (no T0 switch-back).
+
+        This mirrors slicers that switch tools at the start of the next
+        section rather than at the end of the current one.  Each layer
+        starts with T0 implicitly active (from the pre-layer), then T1
+        appears for support at the end — and stays active into the next layer.
+        """
+        header = ";Generated with Cura\nM82\nG28\nT1\nG92 E0\n"
+        pre_layer = (
+            ";LAYER:-1\n"
+            ";TYPE:SUPPORT\n"
+            "G0 F9000 X50 Y50 Z0.2\n"
+            "G1 F800 X60 Y50 E0.5\n"
+            "T0\n"
+            "G92 E0\n"
+            ";TYPE:SKIRT\n"
+            "G0 F9000 X0 Y0 Z0.2\n"
+            "G1 F1200 X5 Y0 E0.3\n"
+        )
+        # Layer 0: T0 walls, then T1 support — NO T0 at end
+        layer0 = (
+            ";LAYER:0\n"
+            "T0\n"
+            "G0 F9000 X10 Y10 Z0.2\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E0.5\nG1 X20 Y20 E1.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E1.5\nG1 X18 Y18 E2.0\n"
+            ";TYPE:SUPPORT\n"
+            "T1\n"
+            "G92 E0\n"
+            "G0 F9000 X50 Y50\n"
+            "G1 F800 X60 Y50 E0.5\nG1 X60 Y60 E1.0\n"
+            # NO T0 here — T1 stays active
+        )
+        # Layer 1: starts with T0 (explicit), same pattern
+        layer1 = (
+            ";LAYER:1\n"
+            "T0\n"
+            "G0 F9000 X10 Y10 Z0.4\n"
+            ";TYPE:WALL-INNER\n"
+            "G0 F9000 X10 Y10\n"
+            "G1 F1200 X20 Y10 E2.5\nG1 X20 Y20 E3.0\n"
+            "G0 X12 Y12\n"
+            "G1 X18 Y12 E3.5\nG1 X18 Y18 E4.0\n"
+            ";TYPE:SUPPORT\n"
+            "T1\n"
+            "G92 E0\n"
+            "G0 F9000 X50 Y50\n"
+            "G1 F800 X60 Y50 E0.5\nG1 X60 Y60 E1.0\n"
+        )
+        return [header, pre_layer, layer0, layer1]
+
+    def test_no_switchback_deferred_loops_use_primary(self):
+        """When layer ends with T1 active (no T0 switch-back), deferred
+        loops must still execute under T0 (the primary extruder).
+
+        The fix inserts T0 before deferred loops and T1 after to restore
+        the original end-of-layer tool state."""
+        gcode = self._make_no_switchback_gcode()
+        result = self.bl._execute(list(gcode))
+
+        for block_idx, block in enumerate(result):
+            if ";LAYER:" not in block or ";LAYER:-" in block:
+                continue
+            lines = block.split("\n")
+            in_deferred = False
+            current_tool = None
+            for line in lines:
+                stripped = line.strip()
+                tool_m = re.match(r'^T(\d+)', stripped)
+                if tool_m:
+                    current_tool = int(tool_m.group(1))
+                if "BrickLayers: shifted loops" in stripped:
+                    in_deferred = True
+                if in_deferred and "BrickLayers Z-restore" in stripped:
+                    in_deferred = False
+                if in_deferred and stripped.startswith("G1 "):
+                    x = BrickLayers._getValue(stripped, "X")
+                    y = BrickLayers._getValue(stripped, "Y")
+                    e = BrickLayers._getValue(stripped, "E")
+                    if x is not None and e is not None:
+                        # Deferred loops should be T0 wall coords (X10-20),
+                        # NOT T1 support coords (X50-60)
+                        self.assertNotEqual(
+                            current_tool, 1,
+                            f"Deferred loop executing under T1 in block "
+                            f"{block_idx}: {stripped}")
+
+    def test_no_switchback_end_tool_state_preserved(self):
+        """After BrickLayers deferred loops, the layer must end with the
+        same tool state as the original (T1 if original ended with T1)."""
+        gcode = self._make_no_switchback_gcode()
+        result = self.bl._execute(list(gcode))
+
+        for block_idx, block in enumerate(result):
+            if ";LAYER:" not in block or ";LAYER:-" in block:
+                continue
+            # Find the last T command in the block
+            last_tool = None
+            for line in block.split("\n"):
+                m = re.match(r'^T(\d+)', line.strip())
+                if m:
+                    last_tool = int(m.group(1))
+            # Original layers end with T1 — processed should too
+            if last_tool is not None:
+                self.assertEqual(
+                    last_tool, 1,
+                    f"Block {block_idx} should end with T1 active but "
+                    f"last tool is T{last_tool}")
+
+    def test_no_switchback_no_t0_coords_under_t1(self):
+        """No extrusion at T0's coordinates (X10-20) while T1 is active."""
+        gcode = self._make_no_switchback_gcode()
+        result = self.bl._execute(list(gcode))
+
+        for block_idx, block in enumerate(result):
+            current_tool = None
+            for line in block.split("\n"):
+                stripped = line.strip()
+                tool_m = re.match(r'^T(\d+)', stripped)
+                if tool_m:
+                    current_tool = int(tool_m.group(1))
+                if current_tool == 1 and stripped.startswith("G1 "):
+                    x = BrickLayers._getValue(stripped, "X")
+                    e = BrickLayers._getValue(stripped, "E")
+                    if x is not None and e is not None and float(e) > 0:
+                        self.assertGreaterEqual(
+                            float(x), 40,
+                            f"T1 extruding at T0 coordinates in block "
+                            f"{block_idx}: {stripped}")
+
+
 if __name__ == "__main__":
     unittest.main()
