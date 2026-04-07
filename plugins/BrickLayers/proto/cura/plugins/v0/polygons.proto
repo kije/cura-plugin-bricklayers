@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package cura.plugins.v0;
+
+import "cura/plugins/v0/point3d.proto";
+
+message OpenPath {
+  repeated Point3D path = 1;
+}
+
+message OpenPaths {
+  repeated OpenPath paths = 1;
+}
+
+message ClosedPath {
+  repeated Point3D path = 1;
+}
+
+message FilledPath {
+  repeated Point3D path = 1;
+}
+
+message Polygon {
+  FilledPath outline = 1;
+  repeated FilledPath holes = 2;
+}
+
+message Polygons {
+  repeated Polygon polygons = 1;
+}

@@ -2,6 +2,7 @@
 # BrickLayers plugin is released under the terms of the LGPLv3 or higher.
 
 from . import BrickLayers
+from .BrickLayersEnginePlugin import BrickLayersEnginePlugin
 
 
 def getMetaData():
@@ -9,4 +10,7 @@ def getMetaData():
 
 
 def register(app):
-    return {"extension": BrickLayers.BrickLayers()}
+    return {
+        "extension": BrickLayers.BrickLayers(),
+        "backend_plugin": BrickLayersEnginePlugin(),
+    }
