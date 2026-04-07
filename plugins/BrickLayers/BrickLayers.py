@@ -12,7 +12,7 @@ from collections import OrderedDict
 import json
 import os
 import re
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, cast
 
 from UM.Application import Application
 from UM.Extension import Extension
@@ -112,6 +112,48 @@ class BrickLayers(Extension):
         self._application.getOutputDeviceManager().writeStarted.connect(
             self._onWriteStarted
         )
+
+        # Save-area indicator (like PostProcessing plugin)
+        self._indicator_view = None
+        CuraApplication.getInstance().mainWindowChanged.connect(
+            self._createIndicator
+        )
+
+    # ------------------------------------------------------------------ #
+    # Save-area indicator
+    # ------------------------------------------------------------------ #
+
+    def _createIndicator(self) -> None:
+        """Create the save-area button that shows when BrickLayers is active."""
+        if self._indicator_view is not None:
+            return  # Already created
+
+        from PyQt6.QtCore import QObject
+
+        plugin_path = PluginRegistry.getInstance().getPluginPath("BrickLayers")
+        if plugin_path is None:
+            return
+
+        qml_path = os.path.join(
+            cast(str, plugin_path), "BrickLayersSaveAreaButton.qml"
+        )
+        self._indicator_view = CuraApplication.getInstance().createQmlComponent(
+            qml_path, {}
+        )
+        if self._indicator_view is None:
+            Logger.log("w", "BrickLayers: Failed to create save-area indicator QML")
+            return
+
+        button = self._indicator_view.findChild(
+            QObject, "brickLayersSaveAreaButton"
+        )
+        if button is not None:
+            CuraApplication.getInstance().addAdditionalComponent(
+                "saveButton", button
+            )
+            Logger.log("d", "BrickLayers: Save-area indicator registered")
+        else:
+            Logger.log("w", "BrickLayers: Could not find brickLayersSaveAreaButton in QML")
 
     # ------------------------------------------------------------------ #
     # Settings injection (same pattern as ArcWelder plugin)
