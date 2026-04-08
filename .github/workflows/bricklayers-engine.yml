@@ -80,15 +80,16 @@ jobs:
             binary_name: bricklayers_engine.exe
             artifact_name: bricklayers_engine-windows-x86_64
 
-          # macOS x86_64 (Intel)
+          # macOS x86_64 (Intel, cross-compiled from Apple Silicon runner)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-macos-x86_64
+            cross: true
 
           # macOS aarch64 (Apple Silicon)
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-macos-aarch64
 
