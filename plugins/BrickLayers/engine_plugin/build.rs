@@ -14,17 +14,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         manifest_dir.join("proto")
     };
 
-    let handshake = proto_dir.join("cura/plugins/slots/handshake/v0/handshake.proto");
-    let broadcast = proto_dir.join("cura/plugins/slots/broadcast/v0/broadcast.proto");
-    let gcode_paths = proto_dir.join("cura/plugins/slots/gcode_paths/v0/modify.proto");
+    // Step 1: Compile shared types (cura.plugins.v0 package).
+    // These are included via tonic::include_proto!("cura.plugins.v0") in main.rs.
+    tonic_build::configure()
+        .build_server(false)
+        .build_client(false)
+        .compile_protos(
+            &[
+                proto_dir.join("cura/plugins/v0/slot_id.proto"),
+                proto_dir.join("cura/plugins/v0/point3d.proto"),
+                proto_dir.join("cura/plugins/v0/printfeatures.proto"),
+                proto_dir.join("cura/plugins/v0/polygons.proto"),
+                proto_dir.join("cura/plugins/v0/gcode_path.proto"),
+            ],
+            &[&proto_dir],
+        )?;
 
+    // Step 2: Compile slot service protos. These reference cura.plugins.v0
+    // types which are mapped via extern_path to the module from step 1.
     tonic_build::configure()
         .build_server(true)
         .build_client(false)
         .extern_path(".cura.plugins.v0", "crate::proto::v0")
         .compile_protos(
-            &[&handshake, &broadcast, &gcode_paths],
+            &[
+                proto_dir.join("cura/plugins/slots/handshake/v0/handshake.proto"),
+                proto_dir.join("cura/plugins/slots/broadcast/v0/broadcast.proto"),
+                proto_dir.join("cura/plugins/slots/gcode_paths/v0/modify.proto"),
+            ],
             &[&proto_dir],
         )?;
+
     Ok(())
 }
