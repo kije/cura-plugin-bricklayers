@@ -5,36 +5,99 @@ on:
     paths:
       - 'plugins/BrickLayers/engine_plugin/**'
       - 'plugins/BrickLayers/proto/**'
+      - 'plugins/BrickLayers/engine_prototype.py'
+      - 'plugins/BrickLayers/tests/**'
       - '.github/workflows/bricklayers-engine.yml'
   pull_request:
     paths:
       - 'plugins/BrickLayers/engine_plugin/**'
       - 'plugins/BrickLayers/proto/**'
+      - 'plugins/BrickLayers/engine_prototype.py'
+      - 'plugins/BrickLayers/tests/**'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  # ---------------------------------------------------------------
+  # Python prototype tests
+  # ---------------------------------------------------------------
+  test-python:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install grpcio grpcio-tools
+
+      - name: Compile proto files
+        working-directory: plugins/BrickLayers
+        run: |
+          python -m grpc_tools.protoc \
+            --proto_path=proto \
+            --python_out=proto \
+            --grpc_python_out=proto \
+            proto/cura/plugins/v0/slot_id.proto \
+            proto/cura/plugins/v0/point3d.proto \
+            proto/cura/plugins/v0/printfeatures.proto \
+            proto/cura/plugins/v0/polygons.proto \
+            proto/cura/plugins/v0/gcode_path.proto \
+            proto/cura/plugins/slots/handshake/v0/handshake.proto \
+            proto/cura/plugins/slots/broadcast/v0/broadcast.proto \
+            proto/cura/plugins/slots/gcode_paths/v0/modify.proto
+
+      - name: Run tests
+        working-directory: plugins/BrickLayers
+        run: python -m unittest tests.TestBrickLayers -v
+
+  # ---------------------------------------------------------------
+  # Rust build matrix — all major platforms
+  # ---------------------------------------------------------------
   build:
+    name: Build (${{ matrix.target }})
+    needs: test-python
     strategy:
+      fail-fast: false
       matrix:
         include:
+          # Linux x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-linux-x86_64
+
+          # Linux aarch64 (cross-compile)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary_name: bricklayers_engine
+            artifact_name: bricklayers_engine-linux-aarch64
+            cross: true
+
+          # Windows x86_64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             binary_name: bricklayers_engine.exe
             artifact_name: bricklayers_engine-windows-x86_64
+
+          # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
             os: macos-13
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-macos-x86_64
+
+          # macOS aarch64 (Apple Silicon)
           - target: aarch64-apple-darwin
             os: macos-14
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-macos-aarch64
 
     runs-on: ${{ matrix.os }}
-    name: Build (${{ matrix.target }})
 
     steps:
       - uses: actions/checkout@v4
@@ -49,32 +112,136 @@ jobs:
         with:
           version: "25.x"
 
-      - name: Build
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/BrickLayers/engine_plugin
+          key: ${{ matrix.target }}
+
+      # Cross-compilation toolchain for Linux aarch64
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Configure cross-compilation linker
+        if: matrix.cross
+        run: |
+          mkdir -p plugins/BrickLayers/engine_plugin/.cargo
+          cat > plugins/BrickLayers/engine_plugin/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build (release)
         working-directory: plugins/BrickLayers/engine_plugin
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      - name: Run Rust tests
+        if: ${{ !matrix.cross }}
+        working-directory: plugins/BrickLayers/engine_plugin
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: plugins/BrickLayers/engine_plugin/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          if-no-files-found: error
 
-  release:
+  # ---------------------------------------------------------------
+  # Package — assemble Cura plugin with all platform binaries
+  # ---------------------------------------------------------------
+  package:
+    name: Package Plugin
     needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Assemble plugin package
+        run: |
+          PKG="bricklayers-plugin"
+          mkdir -p "$PKG/BrickLayers/bin/linux-x86_64"
+          mkdir -p "$PKG/BrickLayers/bin/linux-aarch64"
+          mkdir -p "$PKG/BrickLayers/bin/windows-x86_64"
+          mkdir -p "$PKG/BrickLayers/bin/macos-x86_64"
+          mkdir -p "$PKG/BrickLayers/bin/macos-aarch64"
+
+          # Copy plugin Python files
+          cp plugins/BrickLayers/plugin.json              "$PKG/BrickLayers/"
+          cp plugins/BrickLayers/__init__.py               "$PKG/BrickLayers/"
+          cp plugins/BrickLayers/BrickLayers.py            "$PKG/BrickLayers/"
+          cp plugins/BrickLayers/BrickLayersEnginePlugin.py "$PKG/BrickLayers/"
+          cp plugins/BrickLayers/engine_prototype.py       "$PKG/BrickLayers/"
+          cp plugins/BrickLayers/brick_layers_settings.def.json "$PKG/BrickLayers/"
+          cp -r plugins/BrickLayers/proto                  "$PKG/BrickLayers/"
+
+          # Copy QML files if present
+          cp plugins/BrickLayers/*.qml "$PKG/BrickLayers/" 2>/dev/null || true
+
+          # Copy platform binaries
+          cp artifacts/bricklayers_engine-linux-x86_64/bricklayers_engine   "$PKG/BrickLayers/bin/linux-x86_64/"
+          cp artifacts/bricklayers_engine-linux-aarch64/bricklayers_engine  "$PKG/BrickLayers/bin/linux-aarch64/"
+          cp artifacts/bricklayers_engine-windows-x86_64/bricklayers_engine.exe "$PKG/BrickLayers/bin/windows-x86_64/"
+          cp artifacts/bricklayers_engine-macos-x86_64/bricklayers_engine   "$PKG/BrickLayers/bin/macos-x86_64/"
+          cp artifacts/bricklayers_engine-macos-aarch64/bricklayers_engine  "$PKG/BrickLayers/bin/macos-aarch64/"
+
+          # Make binaries executable
+          chmod +x "$PKG/BrickLayers/bin/"*/bricklayers_engine*
+
+          # Create zip package
+          cd "$PKG"
+          zip -r "../BrickLayers-plugin.zip" BrickLayers/
+          cd ..
+
+          echo "=== Package contents ==="
+          unzip -l BrickLayers-plugin.zip
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: BrickLayers-plugin
+          path: BrickLayers-plugin.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Release — create GitHub release on tag push
+  # ---------------------------------------------------------------
+  release:
+    name: Create Release
+    needs: package
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download plugin package
         uses: actions/download-artifact@v4
+        with:
+          name: BrickLayers-plugin
+
+      - name: Download individual binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries/
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
-            bricklayers_engine-linux-x86_64/bricklayers_engine
-            bricklayers_engine-windows-x86_64/bricklayers_engine.exe
-            bricklayers_engine-macos-x86_64/bricklayers_engine
-            bricklayers_engine-macos-aarch64/bricklayers_engine
+            BrickLayers-plugin.zip
+            binaries/bricklayers_engine-linux-x86_64/bricklayers_engine
+            binaries/bricklayers_engine-linux-aarch64/bricklayers_engine
+            binaries/bricklayers_engine-windows-x86_64/bricklayers_engine.exe
+            binaries/bricklayers_engine-macos-x86_64/bricklayers_engine
+            binaries/bricklayers_engine-macos-aarch64/bricklayers_engine
