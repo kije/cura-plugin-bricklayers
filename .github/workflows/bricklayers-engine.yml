@@ -2,24 +2,55 @@ name: Build BrickLayers Engine Plugin
 
 on:
   push:
-    # branches: [main]
+    branches: [main]
     paths:
       - 'plugins/BrickLayers/engine_plugin/**'
       - 'plugins/BrickLayers/proto/**'
       - 'plugins/BrickLayers/engine_prototype.py'
       - 'plugins/BrickLayers/tests/**'
       - '.github/workflows/bricklayers-engine.yml'
-  #workflow_dispatch:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   # ---------------------------------------------------------------
+  # Detect which components changed
+  # ---------------------------------------------------------------
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      host: ${{ steps.filter.outputs.host }}
+      wasm: ${{ steps.filter.outputs.wasm }}
+      python: ${{ steps.filter.outputs.python }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            host:
+              - 'plugins/BrickLayers/engine_plugin/host/**'
+              - 'plugins/BrickLayers/proto/**'
+              - '.github/workflows/bricklayers-engine.yml'
+            wasm:
+              - 'plugins/BrickLayers/engine_plugin/wasm/**'
+              - 'plugins/BrickLayers/proto/**'
+              - '.github/workflows/bricklayers-engine.yml'
+            python:
+              - 'plugins/BrickLayers/engine_prototype.py'
+              - 'plugins/BrickLayers/tests/**'
+              - 'plugins/BrickLayers/proto/**'
+
+  # ---------------------------------------------------------------
   # Python prototype tests
   # ---------------------------------------------------------------
   test-python:
     name: Python Tests
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,42 +83,75 @@ jobs:
         run: python -m unittest tests.TestBrickLayers -v
 
   # ---------------------------------------------------------------
-  # Rust build matrix — all major platforms
+  # WASM algorithm module (universal, single platform)
   # ---------------------------------------------------------------
-  build:
-    name: Build (${{ matrix.target }})
-    needs: test-python
+  build-wasm:
+    name: Build WASM
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/BrickLayers/engine_plugin
+          key: wasm
+
+      - name: Build WASM module
+        working-directory: plugins/BrickLayers/engine_plugin
+        run: cargo build -p bricklayers_wasm --target wasm32-wasip1 --release
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bricklayers-wasm
+          path: plugins/BrickLayers/engine_plugin/target/wasm32-wasip1/release/bricklayers_wasm.wasm
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Native host binary (per-platform)
+  # ---------------------------------------------------------------
+  build-host:
+    name: Build Host (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.host == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-linux-x86_64
 
-          # Linux aarch64 (cross-compile)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-linux-aarch64
             cross: true
 
-          # Windows x86_64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             binary_name: bricklayers_engine.exe
             artifact_name: bricklayers_engine-windows-x86_64
 
-          # macOS x86_64 (Intel, cross-compiled from Apple Silicon runner)
           - target: x86_64-apple-darwin
             os: macos-latest
             binary_name: bricklayers_engine
             artifact_name: bricklayers_engine-macos-x86_64
             cross: true
 
-          # macOS aarch64 (Apple Silicon)
           - target: aarch64-apple-darwin
             os: macos-latest
             binary_name: bricklayers_engine
@@ -101,7 +165,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }},wasm32-wasip1
+          targets: ${{ matrix.target }}
 
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
@@ -121,7 +185,6 @@ jobs:
           workspaces: plugins/BrickLayers/engine_plugin
           key: ${{ matrix.target }}
 
-      # Cross-compilation toolchain for Linux aarch64
       - name: Install cross-compilation tools
         if: matrix.cross && runner.os == 'Linux'
         run: |
@@ -137,43 +200,38 @@ jobs:
           linker = "aarch64-linux-gnu-gcc"
           EOF
 
-      - name: Build WASM module (universal)
-        working-directory: plugins/BrickLayers/engine_plugin
-        run: cargo build -p bricklayers_wasm --target wasm32-wasip1 --release
-
-      - name: Build native host (platform-specific)
+      - name: Build native host
         working-directory: plugins/BrickLayers/engine_plugin
         run: cargo build -p bricklayers_engine --release --target ${{ matrix.target }}
 
-      - name: Upload host binary artifact
+      - name: Upload host binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: plugins/BrickLayers/engine_plugin/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
           if-no-files-found: error
 
-      - name: Upload WASM module
-        uses: actions/upload-artifact@v4
-        with:
-          name: bricklayers-wasm
-          path: plugins/BrickLayers/engine_plugin/wasm/target/wasm32-wasip1/release/bricklayers_wasm.wasm
-          if-no-files-found: error
-
   # ---------------------------------------------------------------
-  # Package — assemble Cura plugin with all platform binaries
+  # Package — assemble plugin (only when both built)
   # ---------------------------------------------------------------
   package:
     name: Package Plugin
-    needs: build
+    needs: [build-wasm, build-host]
+    if: |
+      always() &&
+      (needs.build-wasm.result == 'success' || needs.build-wasm.result == 'skipped') &&
+      (needs.build-host.result == 'success' || needs.build-host.result == 'skipped') &&
+      (needs.build-wasm.result == 'success' || needs.build-host.result == 'success')
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all binary artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
+        continue-on-error: true
 
       - name: Assemble plugin package
         run: |
@@ -196,20 +254,23 @@ jobs:
           # Copy QML files if present
           cp plugins/BrickLayers/*.qml "$PKG/BrickLayers/" 2>/dev/null || true
 
-          # Copy platform binaries
-          cp artifacts/bricklayers_engine-linux-x86_64/bricklayers_engine   "$PKG/BrickLayers/bin/linux-x86_64/"
-          cp artifacts/bricklayers_engine-linux-aarch64/bricklayers_engine  "$PKG/BrickLayers/bin/linux-aarch64/"
-          cp artifacts/bricklayers_engine-windows-x86_64/bricklayers_engine.exe "$PKG/BrickLayers/bin/windows-x86_64/"
-          cp artifacts/bricklayers_engine-macos-x86_64/bricklayers_engine   "$PKG/BrickLayers/bin/macos-x86_64/"
-          cp artifacts/bricklayers_engine-macos-aarch64/bricklayers_engine  "$PKG/BrickLayers/bin/macos-aarch64/"
-
-          # Copy universal WASM module into each platform bin directory
-          for dir in "$PKG/BrickLayers/bin/"*/; do
-            cp artifacts/bricklayers-wasm/bricklayers_wasm.wasm "$dir/bricklayers.wasm"
+          # Copy platform host binaries (if built)
+          for plat in linux-x86_64 linux-aarch64 windows-x86_64 macos-x86_64 macos-aarch64; do
+            artifact_dir="artifacts/bricklayers_engine-${plat}"
+            if [ -d "$artifact_dir" ]; then
+              cp "$artifact_dir"/* "$PKG/BrickLayers/bin/${plat}/"
+            fi
           done
 
+          # Copy universal WASM module into each platform bin directory (if built)
+          if [ -f artifacts/bricklayers-wasm/bricklayers_wasm.wasm ]; then
+            for dir in "$PKG/BrickLayers/bin/"*/; do
+              cp artifacts/bricklayers-wasm/bricklayers_wasm.wasm "$dir/bricklayers.wasm"
+            done
+          fi
+
           # Make binaries executable
-          chmod +x "$PKG/BrickLayers/bin/"*/bricklayers_engine*
+          chmod +x "$PKG/BrickLayers/bin/"*/bricklayers_engine* 2>/dev/null || true
 
           # Create zip package
           cd "$PKG"
