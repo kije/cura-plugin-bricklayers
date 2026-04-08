@@ -3,6 +3,8 @@
 
 import os
 import platform
+import subprocess
+import stat
 import sys
 from typing import List, Optional
 
@@ -49,6 +51,34 @@ class BrickLayersEnginePlugin(BackendPlugin):
         else:
             return f"linux-{arch}"
 
+    @staticmethod
+    def _ensure_executable(path: str) -> None:
+        """Ensure the binary is executable and not quarantined (macOS).
+
+        On macOS, downloaded files get a com.apple.quarantine extended
+        attribute that prevents execution. Remove it if present. Also
+        ensure the execute permission bit is set.
+        """
+        # Ensure execute permission
+        try:
+            st = os.stat(path)
+            if not (st.st_mode & stat.S_IXUSR):
+                os.chmod(path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                Logger.log("d", "BrickLayers: Set execute permission on %s", path)
+        except OSError as e:
+            Logger.log("w", "BrickLayers: Could not set permissions on %s: %s", path, e)
+
+        # Remove macOS quarantine attribute
+        if Platform.isOSX():
+            try:
+                subprocess.run(
+                    ["xattr", "-d", "com.apple.quarantine", path],
+                    capture_output=True, timeout=5,
+                )
+                Logger.log("d", "BrickLayers: Removed quarantine attribute from %s", path)
+            except (subprocess.SubprocessError, FileNotFoundError):
+                pass  # xattr not found or failed — not critical
+
     def _find_plugin_executable(self) -> Optional[List[str]]:
         """Locate the engine plugin executable.
 
@@ -68,12 +98,14 @@ class BrickLayersEnginePlugin(BackendPlugin):
             plugin_dir, "bin", self._platform_subdir(), binary_name
         )
         if os.path.isfile(platform_path):
+            self._ensure_executable(platform_path)
             Logger.log("d", "BrickLayers: Using compiled engine plugin: %s", platform_path)
             return [platform_path]
 
         # Check flat bin/ directory (local dev build)
         flat_path = os.path.join(plugin_dir, "bin", binary_name)
         if os.path.isfile(flat_path):
+            self._ensure_executable(flat_path)
             Logger.log("d", "BrickLayers: Using compiled engine plugin: %s", flat_path)
             return [flat_path]
 
