@@ -212,7 +212,7 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------
-  # Package — assemble plugin (only when both built)
+  # Package — assemble plugin, reusing previous artifacts if skipped
   # ---------------------------------------------------------------
   package:
     name: Package Plugin
@@ -227,11 +227,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      # Download artifacts built in THIS run
+      - name: Download current run artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
         continue-on-error: true
+
+      # For skipped builds, fetch from the last successful run
+      - name: Fetch previous WASM artifact
+        if: needs.build-wasm.result == 'skipped'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: bricklayers-engine.yml
+          name: bricklayers-wasm
+          path: artifacts/bricklayers-wasm
+          branch: main
+          if_no_artifact_found: warn
+          workflow_conclusion: success
+
+      - name: Fetch previous host binaries
+        if: needs.build-host.result == 'skipped'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: bricklayers-engine.yml
+          name: bricklayers_engine-*
+          name_is_regexp: true
+          path: artifacts/
+          branch: main
+          if_no_artifact_found: warn
+          workflow_conclusion: success
 
       - name: Assemble plugin package
         run: |
@@ -254,19 +279,23 @@ jobs:
           # Copy QML files if present
           cp plugins/BrickLayers/*.qml "$PKG/BrickLayers/" 2>/dev/null || true
 
-          # Copy platform host binaries (if built)
+          # Copy platform host binaries (from this run or previous)
           for plat in linux-x86_64 linux-aarch64 windows-x86_64 macos-x86_64 macos-aarch64; do
             artifact_dir="artifacts/bricklayers_engine-${plat}"
             if [ -d "$artifact_dir" ]; then
               cp "$artifact_dir"/* "$PKG/BrickLayers/bin/${plat}/"
+            else
+              echo "WARNING: No host binary for ${plat}"
             fi
           done
 
-          # Copy universal WASM module into each platform bin directory (if built)
+          # Copy universal WASM module into each platform bin directory
           if [ -f artifacts/bricklayers-wasm/bricklayers_wasm.wasm ]; then
             for dir in "$PKG/BrickLayers/bin/"*/; do
               cp artifacts/bricklayers-wasm/bricklayers_wasm.wasm "$dir/bricklayers.wasm"
             done
+          else
+            echo "WARNING: No WASM module found"
           fi
 
           # Make binaries executable
