@@ -123,13 +123,13 @@ jobs:
 
       # Cross-compilation toolchain for Linux aarch64
       - name: Install cross-compilation tools
-        if: matrix.cross
+        if: matrix.cross && runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Configure cross-compilation linker
-        if: matrix.cross
+        if: matrix.cross && runner.os == 'Linux'
         run: |
           mkdir -p plugins/BrickLayers/engine_plugin/.cargo
           cat > plugins/BrickLayers/engine_plugin/.cargo/config.toml << 'EOF'
