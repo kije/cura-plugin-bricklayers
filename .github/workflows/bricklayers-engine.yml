@@ -289,11 +289,9 @@ jobs:
             fi
           done
 
-          # Copy universal WASM module into each platform bin directory
+          # Copy universal WASM module once into bin/ root
           if [ -f artifacts/bricklayers-wasm/bricklayers_wasm.wasm ]; then
-            for dir in "$PKG/BrickLayers/bin/"*/; do
-              cp artifacts/bricklayers-wasm/bricklayers_wasm.wasm "$dir/bricklayers.wasm"
-            done
+            cp artifacts/bricklayers-wasm/bricklayers_wasm.wasm "$PKG/BrickLayers/bin/bricklayers.wasm"
           else
             echo "WARNING: No WASM module found"
           fi
