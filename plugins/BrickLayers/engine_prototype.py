@@ -27,7 +27,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "pro
 from cura.plugins.v0 import slot_id_pb2
 from cura.plugins.v0 import printfeatures_pb2
 from cura.plugins.v0 import gcode_path_pb2
-from cura.plugins.v0 import settings_pb2
 from cura.plugins.slots.handshake.v0 import handshake_pb2, handshake_pb2_grpc
 from cura.plugins.slots.broadcast.v0 import broadcast_pb2, broadcast_pb2_grpc
 from cura.plugins.slots.gcode_paths.v0 import modify_pb2, modify_pb2_grpc
