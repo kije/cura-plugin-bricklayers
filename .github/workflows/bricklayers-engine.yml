@@ -2,7 +2,7 @@ name: Build BrickLayers Engine Plugin
 
 on:
   push:
-    branches: [main]
+    # branches: [main]
     paths:
       - 'plugins/BrickLayers/engine_plugin/**'
       - 'plugins/BrickLayers/proto/**'
