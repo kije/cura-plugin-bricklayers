@@ -2,18 +2,13 @@ name: Build BrickLayers Engine Plugin
 
 on:
   push:
+    branches: [main]
     paths:
       - 'plugins/BrickLayers/engine_plugin/**'
       - 'plugins/BrickLayers/proto/**'
       - 'plugins/BrickLayers/engine_prototype.py'
       - 'plugins/BrickLayers/tests/**'
       - '.github/workflows/bricklayers-engine.yml'
-  pull_request:
-    paths:
-      - 'plugins/BrickLayers/engine_plugin/**'
-      - 'plugins/BrickLayers/proto/**'
-      - 'plugins/BrickLayers/engine_prototype.py'
-      - 'plugins/BrickLayers/tests/**'
   workflow_dispatch:
 
 env:
