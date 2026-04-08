@@ -198,7 +198,13 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
     ) -> Result<Response<proto::gcode_paths::CallResponse>, Status> {
         let req = request.into_inner();
         let layer_nr = req.layer_nr;
+        let extruder_nr = req.extruder_nr;
         let mut paths = req.gcode_paths;
+
+        info!(
+            ">>> GCodePathsModify called: layer={} extruder={} paths={}",
+            layer_nr, extruder_nr, paths.len(),
+        );
 
         let s = self.settings.get();
 
@@ -209,14 +215,17 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
         };
 
         if !s.enabled {
+            info!("  -> passthrough (disabled)");
             return passthrough(paths);
         }
 
         // Check layer range
         if layer_nr < s.start_layer {
+            info!("  -> passthrough (layer {} < start {})", layer_nr, s.start_layer);
             return passthrough(paths);
         }
         if s.end_layer > 0 && layer_nr > s.end_layer - 1 {
+            info!("  -> passthrough (layer {} > end {})", layer_nr, s.end_layer - 1);
             return passthrough(paths);
         }
 
@@ -244,6 +253,7 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
         let target_outer = s.apply_outer_walls;
 
         if !target_inner && !target_outer {
+            info!("  -> passthrough (no wall types selected)");
             return passthrough(paths);
         }
 
@@ -280,12 +290,10 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
             }
         }
 
-        if modified_count > 0 {
-            debug!(
-                "Layer {}: shifted {}/{} wall paths (z_shift={} um, multiplier={:.3})",
-                layer_nr, modified_count, wall_counter, z_shift, effective_multiplier,
-            );
-        }
+        info!(
+            "  -> layer {}: shifted {}/{} wall paths (z_shift={} um, multiplier={:.3}), returning {} paths total",
+            layer_nr, modified_count, wall_counter, z_shift, effective_multiplier, paths.len(),
+        );
 
         let mut resp = Response::new(proto::gcode_paths::CallResponse {
             gcode_paths: paths,
