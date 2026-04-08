@@ -1,0 +1,23 @@
+[package]
+name = "bricklayers_engine"
+version = "1.0.0"
+edition = "2021"
+description = "BrickLayers CuraEngine plugin host (gRPC + wasmtime)"
+license = "LGPL-3.0-or-later"
+
+[[bin]]
+name = "bricklayers_engine"
+path = "src/main.rs"
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmtime = "29"
+wasmtime-wasi = "29"
+
+[build-dependencies]
+tonic-build = "0.12"

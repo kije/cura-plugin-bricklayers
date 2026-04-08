@@ -101,7 +101,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},wasm32-wasip1
 
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
@@ -137,20 +137,26 @@ jobs:
           linker = "aarch64-linux-gnu-gcc"
           EOF
 
-      - name: Build (release)
+      - name: Build WASM module (universal)
         working-directory: plugins/BrickLayers/engine_plugin
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build -p bricklayers_wasm --target wasm32-wasip1 --release
 
-      - name: Run Rust tests
-        if: ${{ !matrix.cross }}
+      - name: Build native host (platform-specific)
         working-directory: plugins/BrickLayers/engine_plugin
-        run: cargo test --release --target ${{ matrix.target }}
+        run: cargo build -p bricklayers_engine --release --target ${{ matrix.target }}
 
-      - name: Upload binary artifact
+      - name: Upload host binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: plugins/BrickLayers/engine_plugin/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          if-no-files-found: error
+
+      - name: Upload WASM module
+        uses: actions/upload-artifact@v4
+        with:
+          name: bricklayers-wasm
+          path: plugins/BrickLayers/engine_plugin/wasm/target/wasm32-wasip1/release/bricklayers_wasm.wasm
           if-no-files-found: error
 
   # ---------------------------------------------------------------
@@ -196,6 +202,11 @@ jobs:
           cp artifacts/bricklayers_engine-windows-x86_64/bricklayers_engine.exe "$PKG/BrickLayers/bin/windows-x86_64/"
           cp artifacts/bricklayers_engine-macos-x86_64/bricklayers_engine   "$PKG/BrickLayers/bin/macos-x86_64/"
           cp artifacts/bricklayers_engine-macos-aarch64/bricklayers_engine  "$PKG/BrickLayers/bin/macos-aarch64/"
+
+          # Copy universal WASM module into each platform bin directory
+          for dir in "$PKG/BrickLayers/bin/"*/; do
+            cp artifacts/bricklayers-wasm/bricklayers_wasm.wasm "$dir/bricklayers.wasm"
+          done
 
           # Make binaries executable
           chmod +x "$PKG/BrickLayers/bin/"*/bricklayers_engine*
