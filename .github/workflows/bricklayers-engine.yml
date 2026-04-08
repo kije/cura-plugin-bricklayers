@@ -9,7 +9,7 @@ on:
       - 'plugins/BrickLayers/engine_prototype.py'
       - 'plugins/BrickLayers/tests/**'
       - '.github/workflows/bricklayers-engine.yml'
-  workflow_dispatch:
+  #workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
