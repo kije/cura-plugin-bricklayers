@@ -40,7 +40,7 @@ logger = logging.getLogger("bricklayers_engine")
 
 PLUGIN_NAME = "BrickLayers"
 PLUGIN_VERSION = "1.0.0"
-SLOT_VERSION = "0.1.0-alpha.1"
+SLOT_VERSION = "0.1.0-alpha"
 
 
 @dataclass

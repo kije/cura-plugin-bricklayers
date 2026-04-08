@@ -3,11 +3,23 @@ use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
 
+use tonic::metadata::MetadataValue;
+
 use crate::proto;
 
 const PLUGIN_NAME: &str = "BrickLayers";
 const PLUGIN_VERSION: &str = "1.0.0";
-const SLOT_VERSION: &str = "0.1.0-alpha.1";
+const SLOT_VERSION: &str = "0.1.0-alpha";
+
+/// Create gRPC response metadata with the slot version header.
+/// CuraEngine checks this to validate plugin compatibility.
+fn slot_metadata() -> tonic::metadata::MetadataMap {
+    let mut meta = tonic::metadata::MetadataMap::new();
+    meta.insert("cura-slot-version", MetadataValue::from_static(SLOT_VERSION));
+    meta.insert("cura-plugin-name", MetadataValue::from_static(PLUGIN_NAME));
+    meta.insert("cura-plugin-version", MetadataValue::from_static(PLUGIN_VERSION));
+    meta
+}
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -108,12 +120,14 @@ impl proto::handshake::handshake_service_server::HandshakeService for HandshakeS
             req.slot_id, req.plugin_name, req.version,
         );
 
-        Ok(Response::new(proto::handshake::CallResponse {
+        let mut resp = Response::new(proto::handshake::CallResponse {
             slot_version_range: SLOT_VERSION.to_string(),
             plugin_name: PLUGIN_NAME.to_string(),
             plugin_version: PLUGIN_VERSION.to_string(),
             broadcast_subscriptions: vec![proto::v0::SlotId::SettingsBroadcast.into()],
-        }))
+        });
+        *resp.metadata_mut() = slot_metadata();
+        Ok(resp)
     }
 }
 
@@ -188,22 +202,22 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
 
         let s = self.settings.get();
 
+        let passthrough = |p: Vec<proto::v0::GCodePath>| {
+            let mut r = Response::new(proto::gcode_paths::CallResponse { gcode_paths: p });
+            *r.metadata_mut() = slot_metadata();
+            Ok(r)
+        };
+
         if !s.enabled {
-            return Ok(Response::new(proto::gcode_paths::CallResponse {
-                gcode_paths: paths,
-            }));
+            return passthrough(paths);
         }
 
         // Check layer range
         if layer_nr < s.start_layer {
-            return Ok(Response::new(proto::gcode_paths::CallResponse {
-                gcode_paths: paths,
-            }));
+            return passthrough(paths);
         }
         if s.end_layer > 0 && layer_nr > s.end_layer - 1 {
-            return Ok(Response::new(proto::gcode_paths::CallResponse {
-                gcode_paths: paths,
-            }));
+            return passthrough(paths);
         }
 
         // Determine layer thickness
@@ -220,9 +234,7 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
 
         if layer_thickness <= 0 {
             warn!("Layer {}: no layer thickness available, skipping", layer_nr);
-            return Ok(Response::new(proto::gcode_paths::CallResponse {
-                gcode_paths: paths,
-            }));
+            return passthrough(paths);
         }
 
         let z_shift = layer_thickness / 2; // microns
@@ -232,9 +244,7 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
         let target_outer = s.apply_outer_walls;
 
         if !target_inner && !target_outer {
-            return Ok(Response::new(proto::gcode_paths::CallResponse {
-                gcode_paths: paths,
-            }));
+            return passthrough(paths);
         }
 
         // First/last brick layer multiplier adjustments
@@ -277,8 +287,10 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
             );
         }
 
-        Ok(Response::new(proto::gcode_paths::CallResponse {
+        let mut resp = Response::new(proto::gcode_paths::CallResponse {
             gcode_paths: paths,
-        }))
+        });
+        *resp.metadata_mut() = slot_metadata();
+        Ok(resp)
     }
 }
