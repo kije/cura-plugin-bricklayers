@@ -1,2 +1,68 @@
+# === OS ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+
+# === IDEs / Editors ===
 .idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.project
+.settings/
+.classpath
+*.code-workspace
+
+# === AI Assistants ===
 .claude/
+.cursor/
+.copilot/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.whl
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+*.pyo
+
+# === Rust ===
+target/
+**/*.rs.bk
+
+# === Protobuf (generated) ===
+# Keep committed _pb2.py files in src/proto/ (they're vendored)
+
+# === Nix / direnv ===
+.direnv/
+result
+result-*
+
+# === Build artifacts ===
+*.so
+*.dylib
+*.dll
+*.wasm
+*.o
+*.a
+
+# === Archives ===
+*.zip
+*.tar.gz
+*.tgz
+
+# === Logs ===
+*.log
+npm-debug.log*
