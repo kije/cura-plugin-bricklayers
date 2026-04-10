@@ -224,6 +224,8 @@ jobs:
       (needs.build-host.result == 'success' || needs.build-host.result == 'skipped') &&
       (needs.build-wasm.result == 'success' || needs.build-host.result == 'success')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
