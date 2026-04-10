@@ -19,4 +19,6 @@ services:
     ports:
       # KasmVNC browser access — open http://localhost:3000 in any browser.
       - "3000:3000"
+      # Raw VNC for mcp-vnc AI agent access
+      - "5900:5900"
     restart: unless-stopped

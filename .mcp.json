@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "vnc": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/mcp-vnc@latest"],
+      "env": {
+        "VNC_HOST": "localhost",
+        "VNC_PORT": "5900",
+        "VNC_PASSWORD": ""
+      }
+    }
+  }
+}
