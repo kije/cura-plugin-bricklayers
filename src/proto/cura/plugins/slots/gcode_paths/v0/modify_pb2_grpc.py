@@ -5,7 +5,7 @@ import warnings
 
 from cura.plugins.slots.gcode_paths.v0 import modify_pb2 as cura_dot_plugins_dot_slots_dot_gcode__paths_dot_v0_dot_modify__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 

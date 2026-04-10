@@ -1,0 +1,22 @@
+services:
+  cura:
+    image: lscr.io/linuxserver/cura:latest
+    container_name: cura-bricklayers-test
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      # Software rendering — required in containers without a GPU
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - GALLIUM_DRIVER=llvmpipe
+    volumes:
+      # Plugin sources mounted into Cura's user plugin directory.
+      # linuxserver/cura maps /config to the home directory inside the container;
+      # the plugin directory is at /config/.local/share/cura/5.x/plugins/.
+      - ./src:/config/.local/share/cura/5.x/plugins/BrickLayers
+      # Pre-seeded Cura preferences (disables crash reports, update checks, telemetry).
+      - ./docker/cura-config:/config/.local/share/cura/5.x
+    ports:
+      # KasmVNC browser access — open http://localhost:3000 in any browser.
+      - "3000:3000"
+    restart: unless-stopped
