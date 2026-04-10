@@ -16,8 +16,8 @@ tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wasmtime = "29"
-wasmtime-wasi = "29"
+wasmtime = "43"
+wasmtime-wasi = "43"
 
 [build-dependencies]
 tonic-build = "0.12"
