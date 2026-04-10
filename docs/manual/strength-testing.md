@@ -151,11 +151,14 @@ For rigorous validation on your own hardware, see the [Hardware Test Protocol](.
 
 The brick layer concept has roots in:
 
-- **US Patent 5,653,925 (Stratasys, 1995):** Original FDM patent covering staggered bead patterns. Expired 2015-2016, now public domain.
-- **Nacre-inspired architecture (ACS Omega, 2022):** Bio-mimetic research showing that brick-and-mortar interlocking significantly improves fracture resistance in layered structures.
-- **Interfacial mechanical design (npj Advanced Manufacturing, 2025):** Up to +389% improvement in PLA/TPU interfacial toughness using orientation-based mechanical interlocking.
+- **US Patent 5,653,925 (Stratasys, 1995):** Original FDM patent covering staggered/offset bead patterns. Expired 2015-2016, now public domain.
+- **ADDMAN Group re-patent (2020):** A US patent covering substantially the same method was filed by ADDMAN Group (with implementation partner Create it REAL). The patent document cited the Stratasys prior art with the wrong number — US5,**659**,925 (a door-closer patent) instead of the correct US5,**653**,925 — which may have caused examiners to miss the actual prior art. Both the European application and US continuations are under active community challenge. No legal threats have been issued against open-source implementers. ([Fabbaloo](https://www.fabbaloo.com/news/bricklayers-a-new-slicing-technique-to-strengthen-3d-prints-but-patent-issues-loom), [Hackaday](https://hackaday.com/2024/11/09/brick-layers-the-promise-of-stronger-3d-prints-and-why-we-cannot-have-nice-things/))
+- **Mechanical interlocking in FDM (ACS Applied Polymer Materials, 2019):** Confirms that standard FDM interlayer bonds are substantially weaker than bulk material due to incomplete polymer chain entanglement across layers, providing the theoretical backdrop for why geometric interventions like brick layers can help.
+- **Nacre-inspired architecture (ACS Omega, 2022):** Bio-mimetic research on nacre-inspired FDM structures showing that "interlocking, tablet distribution, and intra-layer adhesion are crucial to strengthening fracture resistance" in brick-and-mortar stacked structures.
+- **Interfacial mechanical design (npj Advanced Manufacturing, 2025):** Up to +389% improvement in PLA/TPU interfacial toughness using orientation-based mechanical interlocking — a different mechanism but confirming that geometric interlocking at interfaces is a valid and powerful strategy.
+- **3D concrete printing (Tandfonline, 2024):** Review covering interlocking effects on interlayer adhesion in concrete 3D printing — a directly analogous field showing the same phenomenon at macro scale.
 
-The academic literature broadly confirms that geometric interlocking at layer interfaces is a valid and powerful strategy for improving FDM part strength, supporting the empirical results measured by CNC Kitchen and others.
+The academic literature broadly confirms that geometric interlocking at layer interfaces is a valid strategy for improving layered manufacturing part strength, supporting the empirical results measured by CNC Kitchen and others.
 
 ## References
 
@@ -163,7 +166,17 @@ The academic literature broadly confirms that geometric interlocking at layer in
 2. Creality. "What Is Brick Layer Slicing in 3D Printing?" [store.creality.com](https://store.creality.com/blogs/basics/brick-layer)
 3. GeekDetour/BrickLayers. [github.com](https://github.com/GeekDetour/BrickLayers)
 4. TengerTechnologies/Bricklayers. [github.com](https://github.com/TengerTechnologies/Bricklayers)
-5. Hackaday. "Brick Layers: The Promise of Stronger 3D Prints." November 2024.
-6. Hackaday. "Testing Brick Layers in OrcaSlicer With Staggered Perimeters." June 2025.
-7. Hackaday.io. "Brick Layers: Making 3D Prints Super Waterproof." Project #204613, December 2025.
-8. OrcaSlicer PR #8181. "Stagger Perimeters." [github.com](https://github.com/OrcaSlicer/OrcaSlicer/pull/8181)
+5. Hackaday. "Brick Layers: The Promise of Stronger 3D Prints and Why We Cannot Have Nice Things." November 2024. [hackaday.com](https://hackaday.com/2024/11/09/brick-layers-the-promise-of-stronger-3d-prints-and-why-we-cannot-have-nice-things/)
+6. Hackaday. "Brick Layer Post-Processor, Promising Stronger 3D Prints, Now Available." January 2025. [hackaday.com](https://hackaday.com/2025/01/23/brick-layer-post-processor-promising-stronger-3d-prints-now-available/)
+7. Hackaday. "3D Printed Brick Layers For Everyone." March 2025. [hackaday.com](https://hackaday.com/2025/03/17/3d-printed-brick-layers-for-everyone/)
+8. Hackaday. "Testing Brick Layers in OrcaSlicer With Staggered Perimeters." June 2025. [hackaday.com](https://hackaday.com/2025/06/01/testing-brick-layers-in-orcaslicer-with-staggered-perimeters/)
+9. Hackaday.io. "Brick Layers: Making 3D Prints Super Waterproof." Project #204613, December 2025. [hackaday.io](https://hackaday.io/project/204613-brick-layers-making-3d-prints-super-waterproof)
+10. OrcaSlicer PR #8181. "Stagger Perimeters." [github.com](https://github.com/OrcaSlicer/OrcaSlicer/pull/8181)
+11. Fabbaloo. "Bricklayers: A New Slicing Technique to Strengthen 3D Prints, But Patent Issues Loom." 2024. [fabbaloo.com](https://www.fabbaloo.com/news/bricklayers-a-new-slicing-technique-to-strengthen-3d-prints-but-patent-issues-loom)
+12. Fabbaloo. "Patent Confusion Clouds Brick Layers 3D Printing Technique Despite Public Domain Status." 2024. [fabbaloo.com](https://www.fabbaloo.com/news/patent-confusion-clouds-brick-layers-3d-printing-technique-despite-public-domain-status)
+13. JLC3DP. "Brick Layer for Stronger 3D Prints Now Yours to Use." [jlc3dp.com](https://jlc3dp.com/blog/brick-layer-for-stronger-3d-prints-now-yours-to-use)
+14. 3druck.com. "OrcaSlicer Integrates 'Stagger Perimeters.'" [3druck.com](https://3druck.com/en/programs/orcaslicer-integrates-stagger-perimeters-more-stability-through-staggered-layers-in-the-fdm-print-44147492/)
+15. US Patent 5,653,925 (Stratasys, 1995). Staggered FDM bead patterns. Expired 2015-2016.
+16. ACS Applied Polymer Materials (2019). Mechanical interlocking and interlayer adhesion in FDM.
+17. ACS Omega (2022). "3D-Printed Biomimetic Hierarchical Nacre Architecture."
+18. npj Advanced Manufacturing (2025). "Printing Orientation and Interfacial Mechanical Design Enable Superior Bonding." [doi:10.1038/s44334-026-00075-y](https://www.nature.com/articles/s44334-026-00075-y)
