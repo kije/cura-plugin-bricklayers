@@ -1,6 +1,9 @@
 services:
   cura:
-    image: lscr.io/linuxserver/cura:latest
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    platform: linux/amd64
     container_name: cura-bricklayers-test
     environment:
       - PUID=1000
@@ -10,15 +13,16 @@ services:
       - LIBGL_ALWAYS_SOFTWARE=1
       - GALLIUM_DRIVER=llvmpipe
     volumes:
-      # Plugin sources mounted into Cura's user plugin directory.
-      # linuxserver/cura maps /config to the home directory inside the container;
-      # the plugin directory is at /config/.local/share/cura/5.x/plugins/.
-      - ./src:/config/.local/share/cura/5.x/plugins/BrickLayers
-      # Pre-seeded Cura preferences (disables crash reports, update checks, telemetry).
-      - ./docker/cura-config:/config/.local/share/cura/5.x
+      # Persistent config volume — Docker manages ownership correctly.
+      - cura-data:/config
+      # Plugin sources overlaid into the plugin directory (more specific path wins).
+      - ./src:/config/.local/share/cura/5.12/plugins/BrickLayers
     ports:
       # KasmVNC browser access — open http://localhost:3000 in any browser.
       - "3000:3000"
       # Raw VNC for mcp-vnc AI agent access
       - "5900:5900"
     restart: unless-stopped
+
+volumes:
+  cura-data:
