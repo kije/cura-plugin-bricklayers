@@ -1,16 +1,3 @@
-# Copyright (c) 2024
-# BrickLayers plugin is released under the terms of the LGPLv3 or higher.
-# Inspired by TengerTechnologies/Bricklayers and GeekDetour/BrickLayers.
-#
-# Shifts alternating perimeter wall loops up by half a layer height,
-# creating interlocking brick-like walls for dramatically stronger prints.
-#
-# The actual wall shifting is performed by a CuraEngine plugin
-# (engine_prototype.py / bricklayers_engine binary) that operates on
-# structured GCodePath data via the GCODE_PATHS_MODIFY slot (103),
-# before G-code is generated. This Extension class handles only
-# settings injection into Cura's UI.
-
 from collections import OrderedDict
 import json
 import os

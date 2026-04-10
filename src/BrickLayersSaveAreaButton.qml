@@ -1,10 +1,3 @@
-// Copyright (c) 2024
-// BrickLayers plugin is released under the terms of the LGPLv3 or higher.
-//
-// Save-area indicator shown when BrickLayers is enabled.
-// Informs the user that post-processing will be applied on save,
-// even though the layer preview shows the original slicer output.
-
 import QtQuick 2.4
 import QtQuick.Controls 2.3
 

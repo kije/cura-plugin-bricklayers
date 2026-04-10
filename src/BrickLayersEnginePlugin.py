@@ -1,6 +1,3 @@
-# Copyright (c) 2024
-# BrickLayers plugin is released under the terms of the LGPLv3 or higher.
-
 import os
 import platform
 import subprocess

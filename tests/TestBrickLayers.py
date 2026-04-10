@@ -1,7 +1,3 @@
-# Copyright (c) 2024
-# Tests for the BrickLayers CuraEngine plugin.
-# Tests the gRPC services in engine_prototype.py directly (no network needed).
-
 import os
 import sys
 import unittest
