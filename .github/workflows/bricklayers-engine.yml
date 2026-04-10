@@ -279,6 +279,9 @@ jobs:
           # Copy QML files if present
           cp src/*.qml "$PKG/BrickLayers/" 2>/dev/null || true
 
+          # Copy LICENSE
+          cp LICENSE "$PKG/BrickLayers/" 2>/dev/null || true
+
           # Copy platform host binaries (from this run or previous)
           for plat in linux-x86_64 linux-aarch64 windows-x86_64 macos-x86_64 macos-aarch64; do
             artifact_dir="artifacts/bricklayers_engine-${plat}"

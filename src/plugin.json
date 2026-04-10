@@ -1,8 +1,7 @@
 {
-    "name": "Brick Layers",
+    "name": "BrickLayers",
     "author": "Community",
     "version": "1.0.0",
-    "description": "Shifts alternating perimeter wall loops up by half a layer height, creating interlocking brick-like walls for dramatically stronger prints.",
-    "api": 8,
-    "i18n-catalog": "cura"
+    "supported_sdk_versions": ["8.6.0", "8.7.0", "8.8.0", "8.9.0", "8.10.0", "8.11.0", "8.12.0"],
+    "description": "Shifts alternating perimeter wall loops up by half a layer height, creating interlocking brick-like walls for dramatically stronger prints. Operates as a native CuraEngine plugin using the GCODE_PATHS_MODIFY slot."
 }
