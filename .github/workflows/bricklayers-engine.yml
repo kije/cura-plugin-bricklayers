@@ -4,10 +4,10 @@ on:
   push:
     #branches: [main]
     paths:
-      - 'plugins/BrickLayers/engine_plugin/**'
-      - 'plugins/BrickLayers/proto/**'
-      - 'plugins/BrickLayers/engine_prototype.py'
-      - 'plugins/BrickLayers/tests/**'
+      - 'src/engine_plugin/**'
+      - 'src/proto/**'
+      - 'src/engine_prototype.py'
+      - 'src/tests/**'
       - '.github/workflows/bricklayers-engine.yml'
   workflow_dispatch:
 
@@ -32,17 +32,17 @@ jobs:
         with:
           filters: |
             host:
-              - 'plugins/BrickLayers/engine_plugin/host/**'
-              - 'plugins/BrickLayers/proto/**'
+              - 'src/engine_plugin/host/**'
+              - 'src/proto/**'
               - '.github/workflows/bricklayers-engine.yml'
             wasm:
-              - 'plugins/BrickLayers/engine_plugin/wasm/**'
-              - 'plugins/BrickLayers/proto/**'
+              - 'src/engine_plugin/wasm/**'
+              - 'src/proto/**'
               - '.github/workflows/bricklayers-engine.yml'
             python:
-              - 'plugins/BrickLayers/engine_prototype.py'
-              - 'plugins/BrickLayers/tests/**'
-              - 'plugins/BrickLayers/proto/**'
+              - 'src/engine_prototype.py'
+              - 'src/tests/**'
+              - 'src/proto/**'
 
   # ---------------------------------------------------------------
   # Python prototype tests
@@ -63,7 +63,7 @@ jobs:
         run: pip install grpcio grpcio-tools
 
       - name: Compile proto files
-        working-directory: plugins/BrickLayers
+        working-directory: src
         run: |
           python -m grpc_tools.protoc \
             --proto_path=proto \
@@ -79,7 +79,7 @@ jobs:
             proto/cura/plugins/slots/gcode_paths/v0/modify.proto
 
       - name: Run tests
-        working-directory: plugins/BrickLayers
+        working-directory: src
         run: python -m unittest tests.TestBrickLayers -v
 
   # ---------------------------------------------------------------
@@ -105,18 +105,18 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: plugins/BrickLayers/engine_plugin
+          workspaces: src/engine_plugin
           key: wasm
 
       - name: Build WASM module
-        working-directory: plugins/BrickLayers/engine_plugin
+        working-directory: src/engine_plugin
         run: cargo build -p bricklayers_wasm --target wasm32-wasip1 --release
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
           name: bricklayers-wasm
-          path: plugins/BrickLayers/engine_plugin/target/wasm32-wasip1/release/bricklayers_wasm.wasm
+          path: src/engine_plugin/target/wasm32-wasip1/release/bricklayers_wasm.wasm
           if-no-files-found: error
 
   # ---------------------------------------------------------------
@@ -182,7 +182,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: plugins/BrickLayers/engine_plugin
+          workspaces: src/engine_plugin
           key: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
@@ -194,21 +194,21 @@ jobs:
       - name: Configure cross-compilation linker
         if: matrix.cross && runner.os == 'Linux'
         run: |
-          mkdir -p plugins/BrickLayers/engine_plugin/.cargo
-          cat > plugins/BrickLayers/engine_plugin/.cargo/config.toml << 'EOF'
+          mkdir -p src/engine_plugin/.cargo
+          cat > src/engine_plugin/.cargo/config.toml << 'EOF'
           [target.aarch64-unknown-linux-gnu]
           linker = "aarch64-linux-gnu-gcc"
           EOF
 
       - name: Build native host
-        working-directory: plugins/BrickLayers/engine_plugin
+        working-directory: src/engine_plugin
         run: cargo build -p bricklayers_engine --release --target ${{ matrix.target }}
 
       - name: Upload host binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: plugins/BrickLayers/engine_plugin/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          path: src/engine_plugin/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
           if-no-files-found: error
 
   # ---------------------------------------------------------------
@@ -268,16 +268,16 @@ jobs:
           mkdir -p "$PKG/BrickLayers/bin/macos-aarch64"
 
           # Copy plugin Python files
-          cp plugins/BrickLayers/plugin.json              "$PKG/BrickLayers/"
-          cp plugins/BrickLayers/__init__.py               "$PKG/BrickLayers/"
-          cp plugins/BrickLayers/BrickLayers.py            "$PKG/BrickLayers/"
-          cp plugins/BrickLayers/BrickLayersEnginePlugin.py "$PKG/BrickLayers/"
-          cp plugins/BrickLayers/engine_prototype.py       "$PKG/BrickLayers/"
-          cp plugins/BrickLayers/brick_layers_settings.def.json "$PKG/BrickLayers/"
-          cp -r plugins/BrickLayers/proto                  "$PKG/BrickLayers/"
+          cp src/plugin.json              "$PKG/BrickLayers/"
+          cp src/__init__.py               "$PKG/BrickLayers/"
+          cp src/BrickLayers.py            "$PKG/BrickLayers/"
+          cp src/BrickLayersEnginePlugin.py "$PKG/BrickLayers/"
+          cp src/engine_prototype.py       "$PKG/BrickLayers/"
+          cp src/brick_layers_settings.def.json "$PKG/BrickLayers/"
+          cp -r src/proto                  "$PKG/BrickLayers/"
 
           # Copy QML files if present
-          cp plugins/BrickLayers/*.qml "$PKG/BrickLayers/" 2>/dev/null || true
+          cp src/*.qml "$PKG/BrickLayers/" 2>/dev/null || true
 
           # Copy platform host binaries (from this run or previous)
           for plat in linux-x86_64 linux-aarch64 windows-x86_64 macos-x86_64 macos-aarch64; do
