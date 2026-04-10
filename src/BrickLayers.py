@@ -74,16 +74,18 @@ class BrickLayers(Extension):
             Logger.log("w", "BrickLayers: Failed to create save-area indicator QML")
             return
 
+        # createQmlComponent returns the root Item itself, which is the button
         button = self._indicator_view.findChild(
             QObject, "brickLayersSaveAreaButton"
         )
-        if button is not None:
-            CuraApplication.getInstance().addAdditionalComponent(
-                "saveButton", button
-            )
-            Logger.log("d", "BrickLayers: Save-area indicator registered")
-        else:
-            Logger.log("w", "BrickLayers: Could not find brickLayersSaveAreaButton in QML")
+        if button is None:
+            # Root object IS the button — use it directly
+            button = self._indicator_view
+
+        CuraApplication.getInstance().addAdditionalComponent(
+            "saveButton", button
+        )
+        Logger.log("d", "BrickLayers: Save-area indicator registered")
 
     # ------------------------------------------------------------------ #
     # Settings injection (same pattern as ArcWelder plugin)

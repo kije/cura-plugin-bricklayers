@@ -9,25 +9,17 @@ Item
     id: brickLayersSaveAreaButton
     objectName: "brickLayersSaveAreaButton"
 
-    visible: brickLayersEnabled
+    visible: brickLayersEnabledProvider.properties.value === "True"
     height: UM.Theme.getSize("action_button").height
     width: visible ? height : 0
 
-    property bool brickLayersEnabled:
+    UM.SettingPropertyProvider
     {
-        var globalStack = Cura.MachineManager.activeMachine;
-        if (globalStack === null) return false;
-        return globalStack.getProperty("brick_layers_enabled", "value") === true;
-    }
-
-    Connections
-    {
-        target: Cura.MachineManager
-        function onActiveMachineChanged() { brickLayersEnabled = Qt.binding(function() {
-            var globalStack = Cura.MachineManager.activeMachine;
-            if (globalStack === null) return false;
-            return globalStack.getProperty("brick_layers_enabled", "value") === true;
-        })}
+        id: brickLayersEnabledProvider
+        containerStack: Cura.MachineManager.activeMachine
+        key: "brick_layers_enabled"
+        watchedProperties: [ "value" ]
+        storeIndex: 0
     }
 
     Cura.SecondaryButton
@@ -39,9 +31,6 @@ Item
             tipText += "<br><br>";
             tipText += "Alternating wall loops will be shifted up by half a layer height ";
             tipText += "to create interlocking brick-like walls.";
-            tipText += "<br><br>";
-            tipText += "<i>Note: The layer preview shows the original slicer output. ";
-            tipText += "The BrickLayers transformation is applied when saving the G-code file.</i>";
             return tipText;
         }
         toolTipContentAlignment: UM.Enums.ContentAlignment.AlignLeft
