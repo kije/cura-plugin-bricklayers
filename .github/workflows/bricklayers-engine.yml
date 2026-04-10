@@ -7,7 +7,8 @@ on:
       - 'src/engine_plugin/**'
       - 'src/proto/**'
       - 'src/engine_prototype.py'
-      - 'src/tests/**'
+      - 'tests/**'
+      - 'conftest.py'
       - '.github/workflows/bricklayers-engine.yml'
   workflow_dispatch:
 
@@ -41,7 +42,8 @@ jobs:
               - '.github/workflows/bricklayers-engine.yml'
             python:
               - 'src/engine_prototype.py'
-              - 'src/tests/**'
+              - 'tests/**'
+              - 'conftest.py'
               - 'src/proto/**'
 
   # ---------------------------------------------------------------
@@ -60,7 +62,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install grpcio grpcio-tools
+        run: pip install grpcio grpcio-tools pytest
 
       - name: Compile proto files
         working-directory: src
@@ -78,9 +80,8 @@ jobs:
             proto/cura/plugins/slots/broadcast/v0/broadcast.proto \
             proto/cura/plugins/slots/gcode_paths/v0/modify.proto
 
-      - name: Run tests
-        working-directory: src
-        run: python -m unittest tests.TestBrickLayers -v
+      - name: Run gRPC integration tests
+        run: python -m pytest tests/test_grpc_integration.py -v
 
   # ---------------------------------------------------------------
   # WASM algorithm module (universal, single platform)
