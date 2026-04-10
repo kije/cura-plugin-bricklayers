@@ -2,8 +2,8 @@
 
 use std::path::Path;
 use wasmtime::*;
-use wasmtime_wasi::preview1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::p1::WasiP1Ctx;
 
 use super::BrickSettings;
 
@@ -24,7 +24,7 @@ impl WasmRuntime {
 
         // Link WASI imports
         let mut linker = Linker::new(&engine);
-        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
 
         let instance = linker.instantiate(&mut store, &module)?;
 
