@@ -107,12 +107,14 @@ The plugin has a split architecture:
 
 ## Prior Art and References
 
-The brick layer concept originates from the observation that real-world masonry never aligns vertical joints between courses. Applied to FDM 3D printing:
+This plugin is an **independent implementation** of the brick layer technique, inspired by the public-domain concept and the following open-source projects. No code was copied from any proprietary implementation (such as ADDMAN's ADDCAAM or Create it REAL's REALvision Pro).
+
+The brick layer concept originates from the observation that real-world masonry never aligns vertical joints between courses. The technique was first described in [US Patent 5,653,925](https://patents.google.com/patent/US5653925A/en) (Stratasys, 1995, expired 2015 — now public domain). Applied to FDM 3D printing:
 
 - **CNC Kitchen (Stefan Hermann)** first demonstrated the technique in February 2024, measuring +14% tensile strength in PLA using a multi-process Simplify3D approach. [Blog](https://www.cnckitchen.com/blog/brick-layers-make-3d-prints-stronger)
 - **GeekDetour/BrickLayers** — Post-processing script for PrusaSlicer/OrcaSlicer/BambuStudio. [GitHub](https://github.com/GeekDetour/BrickLayers)
 - **TengerTechnologies/Bricklayers** — Post-processing script with additional non-planar infill support. [GitHub](https://github.com/TengerTechnologies/Bricklayers)
-- **OrcaSlicer** — Native "Stagger Perimeters" feature in nightly builds (PR #8181)
+- **OrcaSlicer** — Native "Stagger Perimeters" feature in nightly builds ([PR #8181](https://github.com/OrcaSlicer/OrcaSlicer/pull/8181))
 - **Creality** — [Explainer article](https://store.creality.com/blogs/basics/brick-layer)
 
 This plugin differs from post-processing scripts by operating at the CuraEngine level (pre-G-code), avoiding the fragility of G-code text manipulation.
@@ -148,6 +150,23 @@ The GitHub Actions workflow (`.github/workflows/bricklayers-engine.yml`) builds:
 - Native host binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64)
 - Packaged plugin zip with all binaries
 
+## Patent Notice
+
+The brick layer / staggered perimeter technique for FDM 3D printing was first
+described in US Patent 5,653,925 (Stratasys, filed 1995, expired 2015), which
+is now in the public domain. Subsequent patents covering similar subject matter
+have been filed and are the subject of ongoing validity challenges. Users should
+be aware of the patent landscape in their jurisdiction. This notice is
+informational and does not constitute legal advice.
+
+See [docs/legal/LEGAL_ANALYSIS.md](docs/legal/LEGAL_ANALYSIS.md) for a detailed analysis.
+
 ## License
 
-LGPLv3 or later. See source file headers.
+LGPLv3 or later. See [LICENSE](LICENSE).
+
+Note: CuraEngine itself is licensed under AGPLv3. BrickLayers communicates with
+CuraEngine via gRPC as a separate process, which is the intended plugin
+architecture. The gRPC protocol definitions are MIT-licensed
+([CuraEngine_grpc_definitions](https://github.com/Ultimaker/CuraEngine_grpc_definitions)).
+The plugin's LGPLv3 license is appropriate for this architecture.
