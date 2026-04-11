@@ -55,6 +55,7 @@ struct BrickSettings {
     apply_outer_walls: bool,
     extrusion_multiplier: f64,
     layer_height: i64,
+    inside_out: bool,
 }
 
 type SharedSettings = Arc<Mutex<BrickSettings>>;
@@ -91,6 +92,9 @@ fn parse_settings(s: &mut BrickSettings, settings_map: &std::collections::HashMa
                 if let Ok(v) = val.parse::<f64>() {
                     s.layer_height = (v * 1000.0) as i64;
                 }
+            }
+            "inset_direction" => {
+                s.inside_out = val == "inside_out";
             }
             _ => {}
         }
@@ -273,7 +277,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let addr = format!("{}:{}", cli.address, cli.port).parse()?;
+    let addr = format!("{}:{}", cli.address, cli.port);
+
+    // Bind the TCP listener FIRST so the port is open before CuraEngine
+    // tries to connect. WASM compilation can take hundreds of milliseconds;
+    // without early binding CuraEngine gets "Connection refused".
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!("BrickLayers engine plugin listening on {}", addr);
 
     // Find the WASM module next to the executable
     let exe_dir = std::env::current_exe()?
@@ -295,7 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let settings: SharedSettings = Arc::new(Mutex::new(BrickSettings::default()));
 
-    info!("BrickLayers engine plugin listening on {}", addr);
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     Server::builder()
         .add_service(
@@ -319,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             ),
         )
-        .serve(addr)
+        .serve_with_incoming(incoming)
         .await?;
 
     Ok(())

@@ -232,6 +232,7 @@ dependencies = [
  "clap",
  "prost",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tracing",

@@ -55,6 +55,7 @@ result-*
 *.dylib
 *.dll
 *.wasm
+*.cwasm
 *.o
 *.a
 

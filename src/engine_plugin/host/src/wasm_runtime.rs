@@ -16,7 +16,7 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     pub fn new(wasm_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let engine = Engine::default();
-        let module = Module::from_file(&engine, wasm_path)?;
+        let module = Self::load_module(&engine, wasm_path)?;
 
         // Set up WASI context (the WASM module needs basic WASI imports)
         let wasi_ctx = WasiCtxBuilder::new().build_p1();
@@ -39,9 +39,61 @@ impl WasmRuntime {
         })
     }
 
+    /// Load a WASM module, using an AOT-compiled cache when available.
+    ///
+    /// First run: compiles from `.wasm` source and writes a `.cwasm` cache
+    /// file next to it. Subsequent runs deserialize the cached native code,
+    /// which is orders of magnitude faster than recompiling.
+    fn load_module(
+        engine: &Engine,
+        wasm_path: &Path,
+    ) -> Result<Module, Box<dyn std::error::Error>> {
+        let cache_path = wasm_path.with_extension("cwasm");
+
+        // Try loading the cached pre-compiled module
+        if cache_path.exists() {
+            let wasm_modified = std::fs::metadata(wasm_path)?.modified()?;
+            let cache_modified = std::fs::metadata(&cache_path)?.modified()?;
+
+            if cache_modified >= wasm_modified {
+                // SAFETY: we trust our own cache file written by the same
+                // engine version. A version mismatch will return Err, not UB.
+                match unsafe { Module::deserialize_file(engine, &cache_path) } {
+                    Ok(module) => {
+                        tracing::info!("Loaded pre-compiled WASM from {:?}", cache_path);
+                        return Ok(module);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Cache invalid (engine version changed?): {}", e);
+                    }
+                }
+            }
+        }
+
+        // Compile from source
+        tracing::info!("Compiling WASM module from {:?}", wasm_path);
+        let module = Module::from_file(engine, wasm_path)?;
+
+        // Cache the compiled module for next time
+        match module.serialize() {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(&cache_path, &bytes) {
+                    tracing::warn!("Could not write WASM cache {:?}: {}", cache_path, e);
+                } else {
+                    tracing::info!("Cached pre-compiled WASM to {:?}", cache_path);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not serialize WASM module: {}", e);
+            }
+        }
+
+        Ok(module)
+    }
+
     /// Push settings into the WASM module.
     pub fn set_settings(&mut self, s: &BrickSettings) {
-        let func = match self.instance.get_typed_func::<(u32, i64, i64, u32, u32, i64, i64), ()>(
+        let func = match self.instance.get_typed_func::<(u32, i64, i64, u32, u32, i64, i64, u32), ()>(
             &mut self.store,
             "set_settings",
         ) {
@@ -64,6 +116,7 @@ impl WasmRuntime {
                 s.apply_outer_walls as u32,
                 multiplier_x1000,
                 s.layer_height,
+                s.inside_out as u32,
             ),
         ) {
             tracing::warn!("WASM: set_settings call failed: {}", e);

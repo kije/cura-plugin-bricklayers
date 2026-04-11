@@ -4,7 +4,7 @@
         "brick_layers_enabled":
         {
             "label": "Brick Layers",
-            "description": "Shift alternating inner wall perimeter loops up by half a layer height, creating interlocking brick-like walls. This dramatically improves vertical part strength by preventing aligned layer seams.",
+            "description": "Shift alternating inner wall perimeter loops up by half a layer height, creating interlocking brick-like walls. This dramatically improves vertical part strength by preventing aligned layer seams. Requires at least 2 inner wall lines. The innermost wall (adjacent to infill) is always kept at nominal height. Recommended: disable 'Alternate Extra Wall', increase 'Z Hop Height' by half the layer height, and set combing to 'Not in Skin' or 'Off'.",
             "type": "bool",
             "default_value": false,
             "settable_per_mesh": false,

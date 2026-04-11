@@ -199,6 +199,7 @@ def server(grpc_server):
     s.apply_outer_walls = False
     s.extrusion_multiplier = 1.05
     s.layer_height = 200
+    s.inset_direction = "outside_in"
     return grpc_server
 
 
@@ -397,52 +398,57 @@ class TestGCodePathsModifyRPC:
         assert result[0].z_offset == 0
 
     def test_odd_wall_paths_shifted_by_half_layer_height(self, server, modify_stub):
-        # layer_height=200 → z_shift = 100
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        # layer_height=200 → z_shift = 100; need 3 walls (innermost protected)
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 100
+        # After reorder: shifted wall is last
+        assert result[-1].z_offset == 100
 
     def test_four_walls_alternating_pattern(self, server, modify_stub):
+        # 4 walls: wall[3] innermost (protected)
+        # Non-innermost: wall[0](c=0,YES), wall[1](c=1,no), wall[2](c=2,YES)
+        # After reorder: 2 normal-Z then 2 shifted
         paths = [_make_path(INNERWALL) for _ in range(4)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[0].z_offset == 0
-        assert result[1].z_offset == 100
-        assert result[2].z_offset == 0
-        assert result[3].z_offset == 100
+        offsets = [p.z_offset for p in result]
+        assert offsets == [0, 0, 100, 100]
 
     def test_z_offset_equals_half_layer_height(self, server, modify_stub):
         server.settings.layer_height = 300
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 150  # 300 // 2
+        assert result[-1].z_offset == 150  # 300 // 2
 
     def test_existing_z_offset_is_additive(self, server, modify_stub):
         paths = [
             _make_path(INNERWALL, z_offset=50),
             _make_path(INNERWALL, z_offset=50),
+            _make_path(INNERWALL, z_offset=50),
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[0].z_offset == 50   # even — unchanged
-        assert result[1].z_offset == 150  # 50 + 100
+        assert result[0].z_offset == 50   # wall 0 (counter=0) — unchanged
+        assert result[1].z_offset == 50   # innermost — protected
+        assert result[2].z_offset == 150  # wall 1 (counter=1): 50 + 100
 
     # --- flow_ratio ---
 
     def test_even_wall_flow_ratio_unchanged(self, server, modify_stub):
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
         assert abs(result[0].flow_ratio - 1.0) < 1e-6
 
     def test_odd_wall_flow_ratio_multiplied(self, server, modify_stub):
         server.settings.extrusion_multiplier = 1.10
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert abs(result[1].flow_ratio - 1.10) < 1e-4
+        # Shifted wall is last after reorder
+        assert abs(result[-1].flow_ratio - 1.10) < 1e-4
 
     # --- non-wall paths pass through ---
 
@@ -466,21 +472,26 @@ class TestGCodePathsModifyRPC:
             assert p.z_offset == 0
 
     def test_mixed_types_only_walls_modified(self, server, modify_stub):
+        # 3 contiguous inner walls surrounded by non-wall paths
         paths = [
             _make_path(SKIN),
             _make_path(INNERWALL),
-            _make_path(INFILL),
             _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INFILL),
             _make_path(SUPPORT),
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert len(result) == 5
-        assert result[0].z_offset == 0    # SKIN
-        assert result[1].z_offset == 0    # wall 0 (even)
-        assert result[2].z_offset == 0    # INFILL
-        assert result[3].z_offset == 100  # wall 1 (odd)
-        assert result[4].z_offset == 0    # SUPPORT
+        assert len(result) == 6
+        # After reorder: all normal-Z first, then shifted
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 1
+        assert shifted[0].feature == INNERWALL
+        # Non-wall paths must all be at z_offset=0
+        for p in result:
+            if p.feature not in (INNERWALL, OUTERWALL):
+                assert p.z_offset == 0
 
     # --- path ordering preserved ---
 
@@ -489,13 +500,14 @@ class TestGCodePathsModifyRPC:
         resp = modify_stub.Call(_call_request(paths))
         assert len(list(resp.gcode_paths)) == 6
 
-    def test_response_preserves_feature_types(self, server, modify_stub):
+    def test_response_preserves_all_feature_types(self, server, modify_stub):
+        """All input feature types are present in output (order may differ due to reorder)."""
         features = [SKIN, INNERWALL, INFILL, OUTERWALL, SUPPORT]
         paths = [_make_path(f) for f in features]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        for i, f in enumerate(features):
-            assert result[i].feature == f
+        result_features = sorted([p.feature for p in result])
+        assert result_features == sorted(features)
 
     # --- wall type selection ---
 
@@ -507,13 +519,15 @@ class TestGCodePathsModifyRPC:
             _make_path(OUTERWALL),
             _make_path(INNERWALL),
             _make_path(INNERWALL),
+            _make_path(INNERWALL),
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[0].z_offset == 0  # outer (not targeted)
-        assert result[1].z_offset == 0  # outer
-        assert result[2].z_offset == 0  # inner wall 0 (even)
-        assert result[3].z_offset == 100  # inner wall 1 (odd)
+        # Outer walls untouched, 1 inner wall shifted (last after reorder)
+        assert all(p.z_offset == 0 for p in result if p.feature == OUTERWALL)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 1
+        assert shifted[0].feature == INNERWALL
 
     def test_outer_walls_only_inner_untouched(self, server, modify_stub):
         server.settings.apply_inner_walls = False
@@ -521,19 +535,24 @@ class TestGCodePathsModifyRPC:
         paths = [
             _make_path(OUTERWALL),
             _make_path(OUTERWALL),
+            _make_path(OUTERWALL),
             _make_path(INNERWALL),
             _make_path(INNERWALL),
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[0].z_offset == 0   # outer wall 0 (even)
-        assert result[1].z_offset == 100  # outer wall 1 (odd)
-        assert result[2].z_offset == 0   # inner (not targeted)
-        assert result[3].z_offset == 0   # inner
+        # Inner walls untouched, 1 outer wall shifted
+        assert all(p.z_offset == 0 for p in result if p.feature == INNERWALL)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 1
+        assert shifted[0].feature == OUTERWALL
 
-    def test_both_wall_types_share_counter(self, server, modify_stub):
+    def test_both_wall_types_share_group(self, server, modify_stub):
+        """When both wall types targeted, they form one contiguous group."""
         server.settings.apply_inner_walls = True
         server.settings.apply_outer_walls = True
+        # 4 contiguous walls: wall[3] innermost (protected)
+        # Non-innermost: [0](c=0,YES), [1](c=1,no), [2](c=2,YES)
         paths = [
             _make_path(OUTERWALL),
             _make_path(INNERWALL),
@@ -542,10 +561,8 @@ class TestGCodePathsModifyRPC:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[0].z_offset == 0
-        assert result[1].z_offset == 100
-        assert result[2].z_offset == 0
-        assert result[3].z_offset == 100
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 2
 
     def test_no_wall_types_selected_noop(self, server, modify_stub):
         server.settings.apply_inner_walls = False
@@ -559,68 +576,68 @@ class TestGCodePathsModifyRPC:
 
     def test_layer_below_start_passes_through(self, server, modify_stub):
         server.settings.start_layer = 5
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths, layer_nr=3))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 0
+        assert all(p.z_offset == 0 for p in result)
 
     def test_layer_at_start_is_modified(self, server, modify_stub):
         server.settings.start_layer = 5
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths, layer_nr=5))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 100
+        assert result[-1].z_offset == 100
 
     def test_layer_above_end_passes_through(self, server, modify_stub):
         server.settings.end_layer = 10
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         # end_layer=10 means last modified index is 9; layer 10 is beyond
         resp = modify_stub.Call(_call_request(paths, layer_nr=10))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 0
+        assert all(p.z_offset == 0 for p in result)
 
     def test_layer_at_last_index_is_modified(self, server, modify_stub):
         server.settings.end_layer = 10
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths, layer_nr=9))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 100
+        assert result[-1].z_offset == 100
 
     def test_end_layer_minus_one_means_unlimited(self, server, modify_stub):
         server.settings.end_layer = -1
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths, layer_nr=9999))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 100
+        assert result[-1].z_offset == 100
 
     # --- first / last brick layer multiplier ---
 
     def test_first_brick_layer_115x_multiplier(self, server, modify_stub):
         server.settings.start_layer = 2
         server.settings.extrusion_multiplier = 1.05
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths, layer_nr=2))
         result = list(resp.gcode_paths)
         expected = 1.05 * 1.15
-        assert abs(result[1].flow_ratio - expected) < 1e-4
+        assert abs(result[-1].flow_ratio - expected) < 1e-4
 
     def test_last_brick_layer_085x_multiplier(self, server, modify_stub):
         server.settings.end_layer = 10
         server.settings.extrusion_multiplier = 1.05
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths, layer_nr=9))  # end_layer - 1
         result = list(resp.gcode_paths)
         expected = 1.05 * 0.85
-        assert abs(result[1].flow_ratio - expected) < 1e-4
+        assert abs(result[-1].flow_ratio - expected) < 1e-4
 
     def test_middle_layer_uses_base_multiplier(self, server, modify_stub):
         server.settings.start_layer = 2
         server.settings.end_layer = 10
         server.settings.extrusion_multiplier = 1.05
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths, layer_nr=5))
         result = list(resp.gcode_paths)
-        assert abs(result[1].flow_ratio - 1.05) < 1e-4
+        assert abs(result[-1].flow_ratio - 1.05) < 1e-4
 
     # --- disabled state ---
 
@@ -664,10 +681,11 @@ class TestGCodePathsModifyRPC:
         paths = [
             _make_path(INNERWALL, layer_thickness=400),
             _make_path(INNERWALL, layer_thickness=400),
+            _make_path(INNERWALL, layer_thickness=400),
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[1].z_offset == 200  # 400 // 2 from path data
+        assert result[-1].z_offset == 200  # 400 // 2 from path data
 
     def test_zero_layer_height_everywhere_skips_modification(self, server, modify_stub):
         server.settings.layer_height = 0
@@ -682,14 +700,15 @@ class TestGCodePathsModifyRPC:
 
     def test_wall_counter_resets_per_rpc_call(self, server, modify_stub):
         """Two separate layer calls must each start their wall counter at zero."""
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        paths = [_make_path(INNERWALL) for _ in range(3)]
         resp1 = modify_stub.Call(_call_request(paths, layer_nr=5))
-        resp2 = modify_stub.Call(_call_request(paths, layer_nr=6))
+        paths2 = [_make_path(INNERWALL) for _ in range(3)]
+        resp2 = modify_stub.Call(_call_request(paths2, layer_nr=6))
         r1 = list(resp1.gcode_paths)
         r2 = list(resp2.gcode_paths)
-        # Both calls should shift the second wall — counter reset each time
-        assert r1[1].z_offset == 100
-        assert r2[1].z_offset == 100
+        # Both calls should have exactly 1 shifted wall
+        assert r1[-1].z_offset == 100
+        assert r2[-1].z_offset == 100
 
     def test_metadata_slot_version_present(self, server, channel):
         """GCodePathsModify response must include cura-slot-version metadata."""
@@ -728,11 +747,252 @@ class TestGCodePathsModifyRPC:
         assert server.settings.enabled is True
         assert server.settings.layer_height == 200
 
-        # Step 3: Modify paths for layer 3
+        # Step 3: Modify paths for layer 3 (3 inner walls + skin)
         mod_stub = modify_pb2_grpc.GCodePathsModifyServiceStub(channel)
-        paths = [_make_path(INNERWALL), _make_path(INNERWALL), _make_path(SKIN)]
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+        ]
         resp = mod_stub.Call(_call_request(paths, layer_nr=3))
         result = list(resp.gcode_paths)
-        assert result[0].z_offset == 0    # wall 0 (even)
-        assert result[1].z_offset == 100  # wall 1 (odd)
-        assert result[2].z_offset == 0    # SKIN unchanged
+        assert len(result) == 4
+        # 1 wall shifted, SKIN unchanged, shifted wall last (reordered)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 1
+        assert shifted[0].z_offset == 100
+        assert all(p.z_offset == 0 for p in result if p.feature == SKIN)
+
+
+# ===========================================================================
+# INNERMOST WALL PROTECTION TESTS
+# ===========================================================================
+
+class TestInnermostWallProtection:
+    """The innermost wall (adjacent to infill) must never be shifted.
+
+    With outside_in ordering (default), the innermost wall is the LAST
+    in each contiguous group of target wall paths.
+    With inside_out ordering, it is the FIRST.
+
+    This prevents collisions between infill and raised wall beads.
+    Minimum 3 contiguous inner walls needed for any shifting to occur
+    (1 innermost protected + at least 2 non-innermost for alternation).
+    """
+
+    # --- outside_in (default) ---
+
+    def test_three_walls_outside_in_innermost_protected(self, server, modify_stub):
+        """3 contiguous inner walls: wall[2] is innermost (last), protected.
+        Non-innermost: wall[0] (counter=0, no), wall[1] (counter=1, YES).
+        """
+        paths = [_make_path(INNERWALL) for _ in range(3)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        unshifted = [p for p in result if p.z_offset == 0]
+        assert len(shifted) == 1
+        assert shifted[0].z_offset == 100  # layer_height=200, shift=100
+        assert len(unshifted) == 2  # wall[0] + innermost wall[2]
+
+    def test_four_walls_outside_in_two_shifted(self, server, modify_stub):
+        """4 inner walls: wall[3] protected (innermost).
+        Non-innermost: wall[0](c=0,YES), wall[1](c=1,no), wall[2](c=2,YES).
+        """
+        paths = [_make_path(INNERWALL) for _ in range(4)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 2
+
+    def test_five_walls_outside_in_two_shifted(self, server, modify_stub):
+        """5 inner walls: wall[4] protected.
+        Non-innermost: wall[0](c=0,no), wall[1](c=1,YES), wall[2](c=2,no), wall[3](c=3,YES).
+        """
+        paths = [_make_path(INNERWALL) for _ in range(5)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 2
+
+    def test_single_wall_always_protected(self, server, modify_stub):
+        """1 inner wall = it IS the innermost, never shifted."""
+        paths = [_make_path(INNERWALL)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        assert result[0].z_offset == 0
+
+    def test_two_walls_one_shifted(self, server, modify_stub):
+        """2 inner walls: wall[1] protected (innermost).
+        wall[0] is the only non-innermost, counter=0 → shifted.
+        """
+        paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 1
+        assert shifted[0].z_offset == 100
+
+    # --- inside_out ---
+
+    def test_three_walls_inside_out_first_protected(self, server, modify_stub):
+        """With inside_out, wall[0] is innermost (first), protected.
+        Non-innermost: wall[1](c=0,no), wall[2](c=1,YES).
+        """
+        server.settings.inset_direction = "inside_out"
+        paths = [_make_path(INNERWALL) for _ in range(3)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        unshifted = [p for p in result if p.z_offset == 0]
+        assert len(shifted) == 1
+        assert len(unshifted) == 2
+
+    # --- realistic contour layout ---
+
+    def test_realistic_contour_outerwall_plus_three_inner(self, server, modify_stub):
+        """OUTERWALL + 3 INNERWALL + INFILL (only inner walls targeted).
+        Inner wall group: indices 1,2,3. Innermost = index 3 (outside_in).
+        Non-innermost: idx 1 (c=0, no), idx 2 (c=1, YES).
+        Result: only wall at index 2 shifted.
+        """
+        paths = [
+            _make_path(OUTERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INFILL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 1
+        assert shifted[0].z_offset == 100
+        # Infill must NOT be shifted
+        infill_paths = [p for p in result if p.feature == INFILL]
+        assert all(p.z_offset == 0 for p in infill_paths)
+
+    def test_two_separate_wall_groups_each_protected(self, server, modify_stub):
+        """Two contiguous wall groups separated by infill.
+        Each group's innermost is protected independently.
+        """
+        paths = [
+            _make_path(INNERWALL),  # group 1: single wall → protected, no shift
+            _make_path(INFILL),
+            _make_path(INNERWALL),  # group 2 start
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),  # group 2 end (innermost, protected)
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        # Group 1: 1 wall → protected, no shift
+        # Group 2: 3 walls → innermost protected, wall counter 0 (no), 1 (YES)
+        assert len(shifted) == 1
+
+    # --- inset_direction broadcast parsing ---
+
+    def test_inset_direction_parsed_from_broadcast(self, server, broadcast_stub):
+        """inset_direction is parsed from the CuraEngine settings broadcast."""
+        broadcast_stub.BroadcastSettings(
+            _settings_request({"inset_direction": "inside_out"})
+        )
+        assert server.settings.inset_direction == "inside_out"
+
+    def test_inset_direction_defaults_to_outside_in(self, server, modify_stub):
+        """Default inset_direction is outside_in."""
+        assert server.settings.inset_direction == "outside_in"
+
+
+# ===========================================================================
+# Z-LEVEL REORDERING TESTS
+# ===========================================================================
+
+class TestZLevelReordering:
+    """After applying z_offset shifts, paths must be stably partitioned:
+    all normal-Z paths first, then all shifted paths.
+    This minimises nozzle Z oscillation within a layer.
+    """
+
+    def test_shifted_walls_appear_after_normal_z_paths(self, server, modify_stub):
+        """In a 3-wall group, the shifted wall must come last in output."""
+        paths = [_make_path(INNERWALL) for _ in range(3)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        # Find the transition point: once we see a shifted path,
+        # all remaining paths must also be shifted (or there are none left)
+        saw_shifted = False
+        for p in result:
+            if p.z_offset > 0:
+                saw_shifted = True
+            elif saw_shifted:
+                # Normal-Z path after a shifted path = ordering violation
+                assert False, "Normal-Z path found after shifted path"
+
+    def test_non_wall_paths_in_normal_z_group(self, server, modify_stub):
+        """OUTERWALL + 3 INNERWALL + INFILL: infill must appear before shifted walls."""
+        paths = [
+            _make_path(OUTERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INFILL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        # All non-shifted paths (including infill) must come before shifted
+        saw_shifted = False
+        for p in result:
+            if p.z_offset > 0:
+                saw_shifted = True
+            elif saw_shifted:
+                assert False, f"Non-shifted path (feature={p.feature}) after shifted path"
+
+    def test_relative_order_preserved_within_normal_z(self, server, modify_stub):
+        """Normal-Z paths preserve their original relative order."""
+        paths = [
+            _make_path(OUTERWALL),   # 0: normal
+            _make_path(INNERWALL),   # 1: normal (c=0, not shifted)
+            _make_path(INNERWALL),   # 2: SHIFTED (c=1)
+            _make_path(INNERWALL),   # 3: innermost, protected
+            _make_path(INFILL),      # 4: normal
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        # Normal-Z group: OUTERWALL, INNERWALL, INNERWALL(innermost), INFILL
+        normal_z = [p for p in result if p.z_offset == 0]
+        features = [p.feature for p in normal_z]
+        assert features == [OUTERWALL, INNERWALL, INNERWALL, INFILL]
+
+    def test_path_count_preserved_after_reordering(self, server, modify_stub):
+        """Total number of paths must not change."""
+        paths = [
+            _make_path(OUTERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INFILL),
+            _make_path(SKIN),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        assert len(result) == 6
+
+    def test_shifted_group_preserves_relative_order(self, server, modify_stub):
+        """If multiple walls are shifted, their relative order is preserved."""
+        # 5 inner walls: walls at counter 1 and 3 get shifted
+        paths = [_make_path(INNERWALL) for _ in range(5)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        shifted = [p for p in result if p.z_offset > 0]
+        assert len(shifted) == 2
+        # Both should have the same z_offset (100)
+        assert all(p.z_offset == 100 for p in shifted)
+
+    def test_no_shifting_means_no_reordering(self, server, modify_stub):
+        """When nothing is shifted, path order is unchanged."""
+        paths = [_make_path(SKIN), _make_path(INFILL), _make_path(SUPPORT)]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        assert [p.feature for p in result] == [SKIN, INFILL, SUPPORT]

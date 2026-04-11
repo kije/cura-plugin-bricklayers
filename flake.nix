@@ -54,6 +54,12 @@
             echo "  Rust:   $(rustc --version)"
             echo "  Python: $(python3 --version)"
             echo "  protoc: $(protoc --version)"
+          '' + pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+            # Override DEVELOPER_DIR after cc-wrapper setup hooks so it matches
+            # the Rust toolchain's embedded SDK 15.5, preventing linker errors:
+            # "Multiple conflicting values for DEVELOPER_DIR_arm64_apple_darwin"
+            export DEVELOPER_DIR="${pkgs.apple-sdk_15}"
+            export SDKROOT="${pkgs.apple-sdk_15}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
           '';
         };
       });

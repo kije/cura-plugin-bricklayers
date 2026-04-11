@@ -26,6 +26,7 @@ pub struct BrickSettings {
     pub apply_outer_walls: bool,
     pub extrusion_multiplier: f64,
     pub layer_height: i64, // microns
+    pub inside_out: bool,
 }
 
 /// Request matching the gRPC CallRequest, but as a simple protobuf message.
@@ -99,23 +100,62 @@ pub fn modify_paths(
         settings.extrusion_multiplier
     };
 
-    let mut wall_counter: u32 = 0;
-
-    for path in &mut paths {
-        let feature = path.feature;
+    // Phase 1: Find contiguous groups of target wall paths.
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    let n = paths.len();
+    while i < n {
+        let feature = paths[i].feature;
         let is_target = (target_inner && feature == INNERWALL)
             || (target_outer && feature == OUTERWALL);
-
         if is_target {
-            if wall_counter % 2 == 1 {
-                path.z_offset += z_shift;
-                path.flow_ratio *= effective_multiplier;
+            let start = i;
+            while i + 1 < n {
+                let next_feature = paths[i + 1].feature;
+                let next_is_target = (target_inner && next_feature == INNERWALL)
+                    || (target_outer && next_feature == OUTERWALL);
+                if !next_is_target {
+                    break;
+                }
+                i += 1;
+            }
+            groups.push((start, i));
+        }
+        i += 1;
+    }
+
+    // Phase 2: Apply shifts per group, protecting the innermost wall.
+    let mut shifted_indices: Vec<bool> = vec![false; paths.len()];
+
+    for &(gs, ge) in &groups {
+        let innermost_idx = if settings.inside_out { gs } else { ge };
+
+        let mut wall_counter: u32 = 0;
+        for idx in gs..=ge {
+            if idx == innermost_idx {
+                continue;
+            }
+            if wall_counter % 2 == 0 {
+                paths[idx].z_offset += z_shift;
+                paths[idx].flow_ratio *= effective_multiplier;
+                shifted_indices[idx] = true;
             }
             wall_counter += 1;
         }
     }
 
-    paths
+    // Phase 3: Stable partition — normal-Z paths first, shifted paths second.
+    let mut normal_z: Vec<proto::GCodePath> = Vec::new();
+    let mut shifted_z: Vec<proto::GCodePath> = Vec::new();
+    for (idx, path) in paths.into_iter().enumerate() {
+        if shifted_indices[idx] {
+            shifted_z.push(path);
+        } else {
+            normal_z.push(path);
+        }
+    }
+    normal_z.extend(shifted_z);
+    normal_z
 }
 
 // -----------------------------------------------------------------------
@@ -131,6 +171,7 @@ static mut SETTINGS: BrickSettings = BrickSettings {
     apply_outer_walls: false,
     extrusion_multiplier: 1.05,
     layer_height: 0,
+    inside_out: false,
 };
 
 /// Allocate memory in the WASM module for the host to write into.
@@ -160,6 +201,7 @@ pub extern "C" fn set_settings(
     apply_outer: u32,
     extrusion_multiplier_x1000: i64,
     layer_height: i64,
+    inside_out: u32,
 ) {
     unsafe {
         SETTINGS.enabled = enabled != 0;
@@ -169,6 +211,7 @@ pub extern "C" fn set_settings(
         SETTINGS.apply_outer_walls = apply_outer != 0;
         SETTINGS.extrusion_multiplier = extrusion_multiplier_x1000 as f64 / 1000.0;
         SETTINGS.layer_height = layer_height;
+        SETTINGS.inside_out = inside_out != 0;
     }
 }
 

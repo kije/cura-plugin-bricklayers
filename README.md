@@ -53,15 +53,20 @@ The core algorithm is implemented in Rust (compiled to WASM for portability), wi
 git clone https://github.com/kije/cura-plugin-bricklayers.git
 cd cura-plugin-bricklayers
 
-# Build the Rust engine (requires Rust toolchain + protoc)
+# Build the Rust engine (requires Rust toolchain with wasm32-wasip1 target + protoc)
 cd src/engine_plugin
 cargo build -p bricklayers_wasm --target wasm32-wasip1 --release
 cargo build -p bricklayers_engine --release
+cd ../..
 
-# Copy plugin files to Cura
-cp -r src/ ~/.local/share/cura/5.12/plugins/BrickLayers/
-cp target/release/bricklayers_engine ~/.local/share/cura/5.12/plugins/BrickLayers/bin/
-cp target/wasm32-wasip1/release/bricklayers_wasm.wasm ~/.local/share/cura/5.12/plugins/BrickLayers/bin/bricklayers.wasm
+# Copy plugin files to Cura (Linux path shown — see "From Release" for other platforms)
+CURA_PLUGINS=~/.local/share/cura/<version>/plugins/BrickLayers
+mkdir -p "$CURA_PLUGINS/bin"
+cp src/plugin.json src/__init__.py src/BrickLayers.py src/BrickLayersEnginePlugin.py \
+   src/engine_prototype.py src/brick_layers_settings.def.json "$CURA_PLUGINS/"
+cp -r src/proto "$CURA_PLUGINS/"
+cp src/engine_plugin/target/release/bricklayers_engine "$CURA_PLUGINS/bin/"
+cp src/engine_plugin/target/wasm32-wasip1/release/bricklayers_wasm.wasm "$CURA_PLUGINS/bin/bricklayers.wasm"
 ```
 
 ## Usage
@@ -126,21 +131,42 @@ See [docs/manual/](docs/manual/) for comprehensive user documentation including:
 - [How BrickLayers Works](docs/manual/how-it-works.md) — Technical explanation with diagrams
 - [User Guide](docs/manual/user-guide.md) — Settings reference and recommendations
 - [Strength and Testing Data](docs/manual/strength-testing.md) — Published test results and benchmarks
-- [Hardware Test Protocol](src/tests/HARDWARE_TEST_PROTOCOL.md) — Validation procedure for real printers
+- [Hardware Test Protocol](tests/HARDWARE_TEST_PROTOCOL.md) — Validation procedure for real printers
 
 ## Development
+
+### Prerequisites
+
+You need a Rust toolchain (with `wasm32-wasip1` target), Python 3.11, `protoc`, and common build tools.
+
+**Option A: Nix + direnv (recommended)**
+
+If you have [Nix](https://nixos.org/) and [direnv](https://direnv.net/) installed, the included `flake.nix` provides everything automatically:
+
+```bash
+direnv allow   # or: nix develop
+```
+
+**Option B: Manual setup**
+
+- Install [Rust](https://rustup.rs/) and add the WASM target: `rustup target add wasm32-wasip1`
+- Install [protoc](https://grpc.io/docs/protoc-installation/)
+- Install Python 3.11 with `grpcio`, `grpcio-tools`, and `pytest`
 
 ### Building
 
 ```bash
-# Rust engine (requires protoc)
+# Rust engine
 cd src/engine_plugin
 cargo build -p bricklayers_wasm --target wasm32-wasip1
 cargo build -p bricklayers_engine
+```
 
-# Python tests
-cd src
-python -m unittest tests.TestBrickLayers -v
+### Testing
+
+```bash
+# Python gRPC integration tests (from repo root)
+python -m pytest tests/ -v
 ```
 
 ### CI

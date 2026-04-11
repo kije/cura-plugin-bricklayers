@@ -53,6 +53,7 @@ class BrickSettings:
     apply_outer_walls: bool = False
     extrusion_multiplier: float = 1.05
     layer_height: int = 0  # microns, from settings broadcast
+    inset_direction: str = "outside_in"  # wall print ordering
 
 
 class HandshakeServicer(handshake_pb2_grpc.HandshakeServiceServicer):
@@ -131,6 +132,8 @@ class BroadcastServicer(broadcast_pb2_grpc.BroadcastServiceServicer):
                     self._settings.layer_height = int(float(val) * 1000)
                 except ValueError:
                     pass
+            elif name == "inset_direction":
+                self._settings.inset_direction = val.lower().strip()
 
 
 class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
@@ -170,8 +173,12 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
     def _apply_brick_pattern(self, paths, layer_nr):
         """Shift alternating wall paths up by half a layer height.
 
-        Each wall GCodePath is treated as a separate loop. Odd-numbered
-        wall paths get their z_offset increased by layer_height/2.
+        For each contiguous group of target wall paths:
+        1. The innermost wall (adjacent to infill) is never shifted,
+           determined by the inset_direction setting.
+        2. Remaining walls are shifted on alternating indices.
+        3. After modification, paths are reordered: all normal-Z paths
+           first, then all shifted paths — minimising Z oscillation.
         """
         settings = self._settings
         layer_thickness = settings.layer_height
@@ -211,25 +218,48 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
         else:
             effective_multiplier = settings.extrusion_multiplier
 
-        # Count wall paths and shift alternating ones
-        wall_counter = 0
-        modified_count = 0
-        result = []
+        # Phase 1: Find contiguous groups of target wall paths
+        groups = []
+        i = 0
+        n = len(paths)
+        while i < n:
+            if paths[i].feature in target_features:
+                start = i
+                while i + 1 < n and paths[i + 1].feature in target_features:
+                    i += 1
+                groups.append((start, i))
+            i += 1
 
-        for path in paths:
-            if path.feature in target_features:
-                if wall_counter % 2 == 1:
-                    # Shift this wall path up by half layer height
-                    path.z_offset += z_shift
-                    path.flow_ratio *= effective_multiplier
-                    modified_count += 1
+        # Phase 2: Apply shifts per group, protecting innermost wall
+        inside_out = settings.inset_direction == "inside_out"
+        shifted_indices = set()
+
+        for gs, ge in groups:
+            # Innermost wall: first in group for inside-out, last for outside-in
+            innermost_idx = gs if inside_out else ge
+
+            # Apply alternating shift to non-innermost walls
+            wall_counter = 0
+            for idx in range(gs, ge + 1):
+                if idx == innermost_idx:
+                    continue
+                if wall_counter % 2 == 0:
+                    paths[idx].z_offset += z_shift
+                    paths[idx].flow_ratio *= effective_multiplier
+                    shifted_indices.add(idx)
                 wall_counter += 1
-            result.append(path)
 
-        if modified_count > 0:
+        # Phase 3: Stable partition — normal-Z paths first, shifted paths second
+        normal_z = [p for i, p in enumerate(paths) if i not in shifted_indices]
+        shifted_z = [p for i, p in enumerate(paths) if i in shifted_indices]
+        result = normal_z + shifted_z
+
+        if shifted_indices:
             logger.debug(
-                "Layer %d: shifted %d/%d wall paths (z_shift=%d um, multiplier=%.3f)",
-                layer_nr, modified_count, wall_counter, z_shift, effective_multiplier,
+                "Layer %d: shifted %d wall paths (z_shift=%d um, multiplier=%.3f), "
+                "protected %d innermost, reordered %d+%d",
+                layer_nr, len(shifted_indices), z_shift, effective_multiplier,
+                len(groups), len(normal_z), len(shifted_z),
             )
 
         return result
