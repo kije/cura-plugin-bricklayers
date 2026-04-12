@@ -8,6 +8,36 @@
         "VNC_PORT": "5900",
         "VNC_PASSWORD": ""
       }
+    },
+    "deepgraph": {
+      "command": "npx",
+      "args": ["-y", "mcp-code-graph@latest", "rust-lang/rust,python/cpython"]
+    },
+    "claude-context": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@zilliz/claude-context-mcp@latest"],
+      "env": {
+        "MILVUS_ADDRESS": "localhost:19533",
+        "EMBEDDING_MODEL": "qwen3-embedding:8b",
+        "EMBEDDING_PROVIDER": "Ollama",
+        "EMBEDDING_BATCH_SIZE": "50"
+      }
+    },
+    "jetbrains-mcp-server": {
+      "type": "sse",
+      "url": "http://localhost:64342/sse"
+    },
+    "logic-sat": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "https://github.com/szeider/mcp-solver.git",
+        "--with",
+        "mcp-solver[pysat,client]",
+        "mcp-solver-pysat"
+      ]
     }
   }
 }

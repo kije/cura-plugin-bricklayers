@@ -1,8 +1,10 @@
 import os
 import platform
+import socket
 import subprocess
 import stat
 import sys
+import time
 from typing import List, Optional
 
 from UM.Logger import Logger
@@ -29,6 +31,7 @@ class BrickLayersEnginePlugin(BackendPlugin):
         super().__init__()
         self._supported_slots: List[int] = [self.GCODE_PATHS_MODIFY_SLOT]
         self._plugin_command = self._find_plugin_executable()
+        self._warmup_engine()
 
     @staticmethod
     def _platform_subdir() -> str:
@@ -114,6 +117,67 @@ class BrickLayersEnginePlugin(BackendPlugin):
 
         Logger.log("w", "BrickLayers: No engine plugin executable found")
         return None
+
+    def _warmup_engine(self) -> None:
+        """Pre-compile the WASM module in the background at plugin load time.
+
+        On macOS, the first execution of a newly installed binary is delayed by
+        Gatekeeper verification. If the binary hasn't run yet when a slice starts,
+        CuraEngine can connect to the port before the binary binds it, causing
+        a RemoteException on Slot 103.
+
+        Running with --warmup at load time (Cura startup) triggers OS verification
+        and pre-creates the .cwasm compilation cache, so the binary starts instantly
+        when the real slice begins.
+        """
+        if self._plugin_command is None:
+            return
+        # Only applies to the compiled binary; the Python prototype has no WASM cache.
+        if len(self._plugin_command) >= 2 and self._plugin_command[0] == sys.executable:
+            return
+        binary = self._plugin_command[0]
+        try:
+            subprocess.Popen(
+                [binary, "--warmup"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            Logger.log("d", "BrickLayers: Warming up WASM cache in background")
+        except OSError as e:
+            Logger.log("w", "BrickLayers: Warmup launch failed: %s", e)
+
+    def start(self) -> bool:
+        """Launch the engine subprocess and wait until the gRPC port is ready.
+
+        BackendPlugin.start() spawns the process and returns immediately.
+        CuraEngine then tries to connect without delay. On slow starts (first
+        run, large WASM recompile) the port may not be bound yet. Polling here
+        keeps the Python side blocked until the engine is accepting connections,
+        ensuring CuraEngine never sees "Connection refused".
+        """
+        if not super().start():
+            return False
+        port = self.getPort()
+        if port:
+            self._poll_port_ready("127.0.0.1", port, timeout=10.0)
+        return True
+
+    def _poll_port_ready(self, host: str, port: int, timeout: float) -> None:
+        """Block until the TCP port accepts connections or the timeout expires."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.5):
+                    Logger.log("d", "BrickLayers: Engine ready on port %d", port)
+                    return
+            except OSError:
+                time.sleep(0.1)
+        Logger.log(
+            "w",
+            "BrickLayers: Engine did not bind port %d within %.0fs — proceeding anyway",
+            port,
+            timeout,
+        )
 
     def usePlugin(self) -> bool:
         """Only activate when brick_layers_enabled is true and an executable exists."""
