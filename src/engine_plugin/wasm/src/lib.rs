@@ -16,6 +16,18 @@ pub mod proto {
 const OUTERWALL: i32 = 1;
 const INNERWALL: i32 = 2;
 
+// Move-type features (travel/retraction between wall loops).
+const MOVEUNRETRACTED: i32 = 8;
+const MOVERETRACTED: i32 = 9;
+const MOVEWHILERETRACTING: i32 = 12;
+const MOVEWHILEUNRETRACTING: i32 = 13;
+const STATIONARYRETRACTUNRETRACT: i32 = 14;
+
+fn is_move_feature(f: i32) -> bool {
+    matches!(f, 0 | MOVEUNRETRACTED | MOVERETRACTED | MOVEWHILERETRACTING
+                | MOVEWHILEUNRETRACTING | STATIONARYRETRACTUNRETRACT)
+}
+
 /// Settings for the brick pattern algorithm, passed from host.
 #[repr(C)]
 pub struct BrickSettings {
@@ -100,44 +112,57 @@ pub fn modify_paths(
         settings.extrusion_multiplier
     };
 
-    // Phase 1: Find contiguous groups of target wall paths.
-    let mut groups: Vec<(usize, usize)> = Vec::new();
-    let mut i = 0;
-    let n = paths.len();
-    while i < n {
-        let feature = paths[i].feature;
-        let is_target = (target_inner && feature == INNERWALL)
-            || (target_outer && feature == OUTERWALL);
-        if is_target {
-            let start = i;
-            while i + 1 < n {
-                let next_feature = paths[i + 1].feature;
-                let next_is_target = (target_inner && next_feature == INNERWALL)
-                    || (target_outer && next_feature == OUTERWALL);
-                if !next_is_target {
-                    break;
-                }
-                i += 1;
+    // Phase 1: Collect groups of target wall path indices.
+    //
+    // CuraEngine inserts travel/retraction paths between wall loops of
+    // the same contour. We tolerate those gaps: a group is a maximal
+    // run of target-wall indices separated only by move-type paths.
+    let is_target = |f: i32| -> bool {
+        (target_inner && f == INNERWALL) || (target_outer && f == OUTERWALL)
+    };
+
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut current_group: Vec<usize> = Vec::new();
+    for (i, p) in paths.iter().enumerate() {
+        if is_target(p.feature) {
+            current_group.push(i);
+        } else if is_move_feature(p.feature) {
+            // tolerate travel gaps inside a group
+        } else {
+            if !current_group.is_empty() {
+                groups.push(std::mem::take(&mut current_group));
             }
-            groups.push((start, i));
         }
-        i += 1;
+    }
+    if !current_group.is_empty() {
+        groups.push(current_group);
     }
 
     // Phase 2: Apply shifts per group, protecting the innermost wall.
     let mut shifted_indices: Vec<bool> = vec![false; paths.len()];
 
-    for &(gs, ge) in &groups {
-        let innermost_idx = if settings.inside_out { gs } else { ge };
+    for group in &groups {
+        if group.len() < 2 {
+            continue; // single wall in contour → always protected
+        }
+
+        let innermost_idx = if settings.inside_out {
+            group[0]
+        } else {
+            group[group.len() - 1]
+        };
 
         let mut wall_counter: u32 = 0;
-        for idx in gs..=ge {
+        for &idx in group {
             if idx == innermost_idx {
                 continue;
             }
             if wall_counter % 2 == 0 {
                 paths[idx].z_offset += z_shift;
-                paths[idx].flow_ratio *= effective_multiplier;
+                // flow_ratio == 0.0 means CuraEngine left it at the proto default;
+                // treat that as 1.0 (no change) so multiplication is correct.
+                let base = if paths[idx].flow_ratio == 0.0 { 1.0_f64 } else { paths[idx].flow_ratio };
+                paths[idx].flow_ratio = base * effective_multiplier;
                 shifted_indices[idx] = true;
             }
             wall_counter += 1;

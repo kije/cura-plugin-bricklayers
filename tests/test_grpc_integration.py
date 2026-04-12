@@ -65,6 +65,8 @@ OUTERWALL = printfeatures_pb2.OUTERWALL
 SKIN = printfeatures_pb2.SKIN
 INFILL = printfeatures_pb2.INFILL
 SUPPORT = printfeatures_pb2.SUPPORT
+MOVEUNRETRACTED = printfeatures_pb2.MOVEUNRETRACTED
+MOVERETRACTED = printfeatures_pb2.MOVERETRACTED
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +905,97 @@ class TestInnermostWallProtection:
     def test_inset_direction_defaults_to_outside_in(self, server, modify_stub):
         """Default inset_direction is outside_in."""
         assert server.settings.inset_direction == "outside_in"
+
+
+# ===========================================================================
+# TRAVEL-GAP TOLERANCE TESTS
+# ===========================================================================
+
+class TestTravelGapTolerance:
+    """CuraEngine inserts travel/retraction paths between wall loops of
+    the same contour.  The grouping logic must tolerate those gaps and
+    still treat the surrounding walls as one group.
+    """
+
+    def test_two_walls_separated_by_travel_still_grouped(self, server, modify_stub):
+        """Two INNERWALL paths with a MOVEUNRETRACTED between them should
+        form a single group and one wall should be shifted."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(MOVEUNRETRACTED),
+            _make_path(INNERWALL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        offsets = [p.z_offset for p in resp.gcode_paths]
+        assert any(o != 0 for o in offsets), "at least one wall must be shifted"
+
+    def test_three_walls_with_travel_gaps(self, server, modify_stub):
+        """Three INNERWALL paths separated by travel moves → one group,
+        innermost protected, one wall shifted."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(MOVERETRACTED),
+            _make_path(INNERWALL),
+            _make_path(MOVEUNRETRACTED),
+            _make_path(INNERWALL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        wall_offsets = [p.z_offset for p in result if p.feature == INNERWALL]
+        shifted = [o for o in wall_offsets if o != 0]
+        assert len(shifted) == 1, f"expected 1 shifted wall, got {len(shifted)}"
+
+    def test_realistic_cura_layer_outer_travel_inner_inner(self, server, modify_stub):
+        """Realistic CuraEngine path sequence: OUTERWALL, travel, INNERWALL,
+        travel, INNERWALL, SKIN, INFILL.  Inner walls should still be grouped
+        and one shifted."""
+        paths = [
+            _make_path(OUTERWALL),
+            _make_path(MOVEUNRETRACTED),
+            _make_path(INNERWALL),
+            _make_path(MOVEUNRETRACTED),
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+            _make_path(INFILL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        inner_offsets = [p.z_offset for p in result if p.feature == INNERWALL]
+        assert any(o != 0 for o in inner_offsets), "inner wall must be shifted"
+        # Non-wall paths must be untouched
+        for p in result:
+            if p.feature in (SKIN, INFILL, MOVEUNRETRACTED):
+                assert p.z_offset == 0
+
+    def test_skin_breaks_group(self, server, modify_stub):
+        """A SKIN path between two INNERWALL paths should break the group,
+        resulting in two single-wall groups (both protected, neither shifted)."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+            _make_path(INNERWALL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        for p in resp.gcode_paths:
+            assert p.z_offset == 0, "walls in separate single-wall groups must not shift"
+
+    def test_two_contours_with_travel_gaps(self, server, modify_stub):
+        """Two separate contours (separated by INFILL), each with 2 walls
+        separated by travel — each contour should have one wall shifted."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(MOVEUNRETRACTED),
+            _make_path(INNERWALL),
+            _make_path(INFILL),
+            _make_path(INNERWALL),
+            _make_path(MOVERETRACTED),
+            _make_path(INNERWALL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        inner_offsets = [p.z_offset for p in result if p.feature == INNERWALL]
+        shifted = [o for o in inner_offsets if o != 0]
+        assert len(shifted) == 2, f"expected 2 shifted walls (one per contour), got {len(shifted)}"
 
 
 # ===========================================================================

@@ -7,7 +7,7 @@ use prost::Message;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use wasm_runtime::WasmRuntime;
 
@@ -200,6 +200,10 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
         // Quick check: if disabled, skip WASM call entirely
         {
             let s = self.settings.lock().unwrap();
+            debug!(
+                "  settings: layer_height={}µm enabled={}",
+                s.layer_height, s.enabled
+            );
             if !s.enabled {
                 info!("  -> passthrough (disabled)");
                 let mut r = Response::new(proto::gcode_paths::CallResponse {
@@ -242,9 +246,12 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
             }
         };
 
+        let shifted = response.gcode_paths.iter().filter(|p| p.z_offset != 0).count();
         info!(
-            "  -> layer {}: WASM returned {} paths",
-            layer_nr, response.gcode_paths.len(),
+            "  -> layer {}: WASM returned {} paths, {} z-shifted",
+            layer_nr,
+            response.gcode_paths.len(),
+            shifted,
         );
 
         let mut r = Response::new(response);
@@ -263,8 +270,14 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     address: String,
 
+    /// gRPC listen port (required unless --warmup is set)
+    #[arg(long, required_unless_present = "warmup")]
+    port: Option<u16>,
+
+    /// Pre-compile the WASM module to create the .cwasm cache, then exit.
+    /// Called at plugin load time to eliminate startup delay on first run.
     #[arg(long)]
-    port: u16,
+    warmup: bool,
 }
 
 #[tokio::main]
@@ -277,7 +290,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let addr = format!("{}:{}", cli.address, cli.port);
+
+    // Warmup mode: compile WASM (creating .cwasm cache) then exit.
+    // Called from Python at plugin load time so that the first real slice
+    // starts the binary instantly (OS has already verified it and the
+    // .cwasm cache avoids recompilation).
+    if cli.warmup {
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        let wasm_path = [
+            exe_dir.join("bricklayers.wasm"),
+            exe_dir.join("../bricklayers.wasm"),
+            std::path::PathBuf::from("bricklayers.wasm"),
+        ]
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or("Could not find bricklayers.wasm")?;
+        info!("BrickLayers warmup: compiling WASM from {:?}", wasm_path);
+        WasmRuntime::new(&wasm_path)?;
+        info!("BrickLayers warmup complete");
+        return Ok(());
+    }
+
+    let port = cli.port.expect("--port is required without --warmup");
+    let addr = format!("{}:{}", cli.address, port);
 
     // Bind the TCP listener FIRST so the port is open before CuraEngine
     // tries to connect. WASM compilation can take hundreds of milliseconds;

@@ -218,34 +218,56 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
         else:
             effective_multiplier = settings.extrusion_multiplier
 
-        # Phase 1: Find contiguous groups of target wall paths
-        groups = []
-        i = 0
-        n = len(paths)
-        while i < n:
-            if paths[i].feature in target_features:
-                start = i
-                while i + 1 < n and paths[i + 1].feature in target_features:
-                    i += 1
-                groups.append((start, i))
-            i += 1
+        # Phase 1: Collect groups of target wall path indices.
+        #
+        # CuraEngine often inserts travel/retraction paths (MOVEUNRETRACTED,
+        # MOVERETRACTED, etc.) between wall loops of the same contour.
+        # We tolerate those gaps: a group is a maximal run of target-wall
+        # indices separated only by move-type paths.  A non-move, non-target
+        # feature (SKIN, INFILL, SUPPORT, …) ends the group.
+        move_features = {
+            printfeatures_pb2.NONETYPE,
+            printfeatures_pb2.MOVEUNRETRACTED,
+            printfeatures_pb2.MOVERETRACTED,
+            printfeatures_pb2.MOVEWHILERETRACTING,
+            printfeatures_pb2.MOVEWHILEUNRETRACTING,
+            printfeatures_pb2.STATIONARYRETRACTUNRETRACT,
+        }
+
+        groups = []          # each group is a list of indices into `paths`
+        current_group = []
+        for i, p in enumerate(paths):
+            if p.feature in target_features:
+                current_group.append(i)
+            elif p.feature in move_features:
+                pass          # tolerate travel gaps inside a group
+            else:
+                if current_group:
+                    groups.append(current_group)
+                    current_group = []
+        if current_group:
+            groups.append(current_group)
 
         # Phase 2: Apply shifts per group, protecting innermost wall
         inside_out = settings.inset_direction == "inside_out"
         shifted_indices = set()
 
-        for gs, ge in groups:
+        for group in groups:
+            if len(group) < 2:
+                continue  # single wall in contour → always protected
+
             # Innermost wall: first in group for inside-out, last for outside-in
-            innermost_idx = gs if inside_out else ge
+            innermost_idx = group[0] if inside_out else group[-1]
 
             # Apply alternating shift to non-innermost walls
             wall_counter = 0
-            for idx in range(gs, ge + 1):
+            for idx in group:
                 if idx == innermost_idx:
                     continue
                 if wall_counter % 2 == 0:
                     paths[idx].z_offset += z_shift
-                    paths[idx].flow_ratio *= effective_multiplier
+                    base = paths[idx].flow_ratio if paths[idx].flow_ratio != 0.0 else 1.0
+                    paths[idx].flow_ratio = base * effective_multiplier
                     shifted_indices.add(idx)
                 wall_counter += 1
 
