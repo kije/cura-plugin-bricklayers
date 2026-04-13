@@ -12,12 +12,55 @@ CuraEngine connects as gRPC client; this plugin runs as server.
 """
 
 import argparse
+import json
 import logging
 import sys
 import os
 from concurrent import futures
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+
+_DEBUG_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "BrickLayers_debug.jsonl"
+)
+
+
+def _feature_name(feature_int: int) -> str:
+    names = {0: "NONE", 1: "OUTERWALL", 2: "INNERWALL", 4: "SKIN", 5: "SUPPORT",
+             6: "SKIRT", 7: "INFILL", 8: "MOVEUNRETRACTED", 9: "MOVERETRACTED",
+             10: "PRIME", 12: "MOVEWHILERETRACTING", 13: "MOVEWHILEUNRETRACTING", 14: "STATIONARYRETRACTUNRETRACT"}
+    return names.get(feature_int, f"UNKNOWN({feature_int})")
+
+
+def _log_call(layer_nr, extruder_nr, req_paths, resp_paths):
+    # Group input paths by (feature, mesh_name, z_offset) → count
+    from collections import Counter
+    in_groups = Counter(
+        (_feature_name(p.feature), p.mesh_name or "", p.z_offset)
+        for p in req_paths
+    )
+    out_groups = Counter(
+        (_feature_name(p.feature), p.mesh_name or "", p.z_offset)
+        for p in resp_paths
+    )
+    record = {
+        "layer_nr": layer_nr,
+        "extruder_nr": extruder_nr,
+        "path_count": len(req_paths),
+        "input_z_shifted": sum(1 for p in req_paths if p.z_offset != 0),
+        "output_z_shifted": sum(1 for p in resp_paths if p.z_offset != 0),
+        "input_groups": [
+            {"feature": f, "mesh": m, "z_offset": z, "count": c}
+            for (f, m, z), c in sorted(in_groups.items())
+        ],
+        "output_groups": [
+            {"feature": f, "mesh": m, "z_offset": z, "count": c}
+            for (f, m, z), c in sorted(out_groups.items())
+        ],
+    }
+    with open(_DEBUG_LOG_PATH, "a") as f:
+        f.write(json.dumps(record) + "\n")
 
 import grpc
 
@@ -157,17 +200,21 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
         paths = list(request.gcode_paths)
 
         if not self._settings.enabled:
+            _log_call(layer_nr, extruder_nr, paths, paths)
             return modify_pb2.CallResponse(gcode_paths=paths)
 
         # Check layer range
         if layer_nr < self._settings.start_layer:
+            _log_call(layer_nr, extruder_nr, paths, paths)
             return modify_pb2.CallResponse(gcode_paths=paths)
         if self._settings.end_layer > 0:
             end_layer_idx = self._settings.end_layer - 1
             if layer_nr > end_layer_idx:
+                _log_call(layer_nr, extruder_nr, paths, paths)
                 return modify_pb2.CallResponse(gcode_paths=paths)
 
         modified = self._apply_brick_pattern(paths, layer_nr)
+        _log_call(layer_nr, extruder_nr, paths, modified)
         return modify_pb2.CallResponse(gcode_paths=modified)
 
     def _apply_brick_pattern(self, paths, layer_nr):
@@ -296,7 +343,7 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
                 if idx == innermost_idx:
                     continue
                 if wall_counter % 2 == 0:
-                    paths[idx].z_offset += z_shift
+                    paths[idx].z_offset = z_shift
                     base = paths[idx].flow_ratio if paths[idx].flow_ratio != 0.0 else 1.0
                     paths[idx].flow_ratio = base * effective_multiplier
                     shifted_indices.add(idx)
@@ -330,7 +377,7 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
                     if paths[i].feature in move_features:
                         clone = gcode_path_pb2.GCodePath()
                         clone.CopyFrom(paths[i])
-                        clone.z_offset += z_shift
+                        clone.z_offset = z_shift
                         shifted_sequence.append(clone)
 
         result = [p for i, p in enumerate(paths) if i not in shifted_indices]

@@ -45,7 +45,7 @@ Run from project root.
 - SDK env vars: set `DEVELOPER_DIR`/`SDKROOT` in `shellHook` only (not as `mkShell` env attrs — cc wrapper overrides those)
 - `~/.cargo/config.toml`: global `target-cpu=native` + `target-feature=+neon` for aarch64
 - Cura 5.12 Docker: QML errors in `BrickLayersSaveAreaButton.qml:20,29` — known, cosmetic
-- Engine plugin not invoked during Docker slicing (gRPC handshake not initiated) — known issue
+
 - WASM warmup: `--warmup` flag pre-compiles `.cwasm` cache at plugin load; addresses macOS Gatekeeper delay
 - Port readiness: `start()` polls TCP port after `super().start()` to prevent "Connection refused" races
 

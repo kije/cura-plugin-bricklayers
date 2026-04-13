@@ -19,7 +19,7 @@ impl WasmRuntime {
         let module = Self::load_module(&engine, wasm_path)?;
 
         // Set up WASI context (the WASM module needs basic WASI imports)
-        let wasi_ctx = WasiCtxBuilder::new().build_p1();
+        let wasi_ctx = WasiCtxBuilder::new().inherit_stderr().build_p1();
         let mut store = Store::new(&engine, wasi_ctx);
 
         // Link WASI imports

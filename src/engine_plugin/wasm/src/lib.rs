@@ -73,6 +73,7 @@ pub fn modify_paths(
     }
 
     if layer_nr < settings.start_layer {
+        eprintln!("WASM: passthrough (layer_nr={} < start_layer={})", layer_nr, settings.start_layer);
         return paths;
     }
     if settings.end_layer > 0 && layer_nr > settings.end_layer - 1 {
@@ -193,7 +194,7 @@ pub fn modify_paths(
                 continue;
             }
             if wall_counter % 2 == 0 {
-                paths[idx].z_offset += z_shift;
+                paths[idx].z_offset = z_shift;
                 // flow_ratio == 0.0 means CuraEngine left it at the proto default;
                 // treat that as 1.0 (no change) so multiplication is correct.
                 let base = if paths[idx].flow_ratio == 0.0 { 1.0_f64 } else { paths[idx].flow_ratio };
@@ -238,7 +239,7 @@ pub fn modify_paths(
             for i in (cur_last + 1)..next_first {
                 if is_move_feature(paths[i].feature) {
                     let mut cloned = paths[i].clone();
-                    cloned.z_offset += z_shift;
+                    cloned.z_offset = z_shift;
                     shifted_sequence.push(cloned);
                 }
             }
@@ -332,6 +333,13 @@ pub extern "C" fn process_layer(
             return std::ptr::null_mut();
         }
     };
+
+    let settings = unsafe { &*std::ptr::addr_of!(SETTINGS) };
+    eprintln!(
+        "WASM process_layer: layer_nr={} extruder_nr={} paths={} start_layer={} enabled={}",
+        request.layer_nr, request.extruder_nr, request.gcode_paths.len(),
+        settings.start_layer, settings.enabled,
+    );
 
     let result = unsafe {
         modify_paths(request.gcode_paths, request.layer_nr, &SETTINGS)

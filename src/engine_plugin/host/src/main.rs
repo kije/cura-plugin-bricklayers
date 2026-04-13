@@ -191,10 +191,11 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
         let req = request.into_inner();
         let layer_nr = req.layer_nr;
         let path_count = req.gcode_paths.len();
+        let input_z_shifted = req.gcode_paths.iter().filter(|p| p.z_offset != 0).count();
 
         info!(
-            ">>> GCodePathsModify called: layer={} extruder={} paths={}",
-            layer_nr, req.extruder_nr, path_count,
+            ">>> GCodePathsModify called: layer={} extruder={} paths={} (input_z_shifted={})",
+            layer_nr, req.extruder_nr, path_count, input_z_shifted,
         );
 
         // Quick check: if disabled, skip WASM call entirely

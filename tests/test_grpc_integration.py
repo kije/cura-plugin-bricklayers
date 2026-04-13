@@ -431,7 +431,10 @@ class TestGCodePathsModifyRPC:
         result = list(resp.gcode_paths)
         assert result[-1].z_offset == 150  # 300 // 2
 
-    def test_existing_z_offset_is_additive(self, server, modify_stub):
+    def test_existing_z_offset_is_overwritten(self, server, modify_stub):
+        # CuraEngine re-sends paths with stale z_offset values from the previous
+        # layer's response. The algorithm must assign z_shift absolutely (= not +=)
+        # so that stale offsets don't accumulate across layers.
         paths = [
             _make_path(INNERWALL, z_offset=50),
             _make_path(INNERWALL, z_offset=50),
@@ -439,9 +442,9 @@ class TestGCodePathsModifyRPC:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert result[0].z_offset == 50   # wall 0 (counter=0) — unchanged
-        assert result[1].z_offset == 50   # innermost — protected
-        assert result[2].z_offset == 150  # wall 1 (counter=1): 50 + 100
+        assert result[0].z_offset == 50   # wall 0 (counter=0) — unchanged (not shifted)
+        assert result[1].z_offset == 50   # innermost — protected, never shifted
+        assert result[2].z_offset == 100  # wall 1 (counter=1): absolute z_shift, ignores stale 50
 
     # --- flow_ratio ---
 

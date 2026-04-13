@@ -112,11 +112,40 @@ class BrickLayersEnginePlugin(BackendPlugin):
         # Fall back to Python prototype
         prototype_path = os.path.join(plugin_dir, "engine_prototype.py")
         if os.path.isfile(prototype_path):
-            Logger.log("d", "BrickLayers: Using Python prototype engine plugin: %s", prototype_path)
-            return ["/lsiopy/bin/python3", prototype_path]
+            python = self._find_python()
+            Logger.log("d", "BrickLayers: Using Python prototype engine plugin: %s (python: %s)", prototype_path, python)
+            return [python, prototype_path]
 
         Logger.log("w", "BrickLayers: No engine plugin executable found")
         return None
+
+    @staticmethod
+    def _find_python() -> str:
+        """Return the best available Python 3 executable for the current environment.
+
+        Priority order:
+        1. /lsiopy/bin/python3  — linuxserver.io Docker images (VNC test container)
+        2. sys.executable       — the interpreter Cura itself is running under
+        3. shutil.which("python3") / shutil.which("python") — PATH fallback
+        """
+        import shutil
+
+        candidates = [
+            "/lsiopy/bin/python3",  # linuxserver.io venv (Docker / VNC container)
+            sys.executable,         # Cura's own interpreter (macOS app bundle, pip install, etc.)
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+
+        # Last resort: search PATH
+        for name in ("python3", "python"):
+            found = shutil.which(name)
+            if found:
+                return found
+
+        # Should never happen — sys.executable is always set
+        return sys.executable
 
     def _warmup_engine(self) -> None:
         """Pre-compile the WASM module in the background at plugin load time.
@@ -133,7 +162,8 @@ class BrickLayersEnginePlugin(BackendPlugin):
         if self._plugin_command is None:
             return
         # Only applies to the compiled binary; the Python prototype has no WASM cache.
-        if len(self._plugin_command) >= 2 and self._plugin_command[0] == sys.executable:
+        # Prototype commands are [python, script] (length >= 2); binary commands are [path] (length 1).
+        if len(self._plugin_command) >= 2:
             return
         binary = self._plugin_command[0]
         try:
