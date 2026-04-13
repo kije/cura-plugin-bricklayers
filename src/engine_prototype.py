@@ -409,12 +409,23 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
             if any(i in shifted_indices for i in g)
         ]
 
+        # Build the shifted sub-sequence. Synthesize retracted travel between
+        # consecutive shifted walls whenever their endpoints don't connect —
+        # this covers both intra-group gaps (unshifted walls between two shifted
+        # walls in the same group) and inter-group gaps.
+        #
+        # Original travel paths are intentionally NOT carried over: doing so
+        # marks them as shifted, removes them from normal-Z, and leaves gaps
+        # that CuraEngine fills with spurious extrusion lines. Leaving them in
+        # normal-Z is safe — they are MOVE features, so the nozzle traverses the
+        # removed wall's footprint as travel with no extrusion artifact.
         shifted_sequence = []
         for gi in groups_with_shifts:
             group = groups[gi]
             for idx in group:
                 if idx in shifted_indices:
-                    # Insert travel if previous shifted wall ends at a different position
+                    # Synthesize retracted travel whenever the shifted sequence
+                    # ends with a wall whose endpoint doesn't match this wall's start.
                     if shifted_sequence:
                         prev = shifted_sequence[-1]
                         if prev.feature not in move_features:
@@ -424,7 +435,58 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
                                 shifted_sequence.append(_make_travel(pe, cs, paths[idx].mesh_name))
                     shifted_sequence.append(paths[idx])
 
-        result = [p for i, p in enumerate(paths) if i not in shifted_indices]
+        # Normal-Z sub-sequence: retain original indices to detect gaps.
+        normal_z_indexed = [(i, p) for i, p in enumerate(paths) if i not in shifted_indices]
+
+        # Phase 3b: Fill gaps in normal-Z created by removing shifted walls.
+        #
+        # When CuraEngine places two extrusion paths with no explicit travel between
+        # them (combing / no z-hop), and a shifted wall sat between them in the
+        # original sequence, removing that wall leaves the two paths adjacent in
+        # normal-Z with mismatched endpoints → CuraEngine extrudes the gap.
+        #
+        # Detect by original-index distance: if consecutive normal-Z paths have
+        # original indices i and j with j > i+1, a shifted wall was removed between
+        # them. Insert MOVERETRACTED (z_offset=0) to bridge mismatched endpoints.
+        # If originally adjacent (j == i+1), CuraEngine placed them back-to-back
+        # on purpose (combing) — do NOT insert a spurious travel.
+        result = []
+        prev_state = None  # (orig_idx, is_extrusion, last_point)
+        for orig_idx, path in normal_z_indexed:
+            if prev_state is not None:
+                prev_orig_idx, prev_is_extr, prev_end = prev_state
+                if orig_idx > prev_orig_idx + 1:   # a shifted wall was removed between them
+                    if prev_is_extr and path.feature not in move_features:
+                        # Case A: extrusion → gap → extrusion — synthesize travel.
+                        cs = _path_first_point(path)
+                        if prev_end and cs and (prev_end.x != cs.x or prev_end.y != cs.y):
+                            gap_travel = gcode_path_pb2.GCodePath()
+                            gap_travel.feature = printfeatures_pb2.MOVERETRACTED
+                            gap_travel.retract = True
+                            gap_travel.z_offset = 0
+                            gap_travel.speed_factor = ref_speed_factor
+                            gap_travel.layer_thickness = layer_thickness
+                            gap_travel.mesh_name = path.mesh_name
+                            if ref_travel and ref_travel.HasField('speed_derivatives'):
+                                gap_travel.speed_derivatives.CopyFrom(ref_travel.speed_derivatives)
+                            gap_travel.path.CopyFrom(polygons_pb2.OpenPath(path=[
+                                point3d_pb2.Point3D(x=prev_end.x, y=prev_end.y, z=prev_end.z),
+                                point3d_pb2.Point3D(x=cs.x, y=cs.y, z=cs.z),
+                            ]))
+                            result.append(gap_travel)
+                    elif not prev_is_extr and path.feature not in move_features:
+                        # Case B: travel → gap → extrusion
+                        # The travel's last point was the shifted wall's start; redirect
+                        # it to the next extrusion's start so the head arrives correctly.
+                        cs = _path_first_point(path)
+                        if (result and cs and prev_end
+                                and (prev_end.x != cs.x or prev_end.y != cs.y)):
+                            if result[-1].path.path:
+                                result[-1].path.path[-1].CopyFrom(cs)
+            new_end = _path_last_point(path)
+            is_extr = path.feature not in move_features
+            prev_state = (orig_idx, is_extr, new_end)
+            result.append(path)
 
         # Synthesize retracted travel between normal-Z and shifted-Z sub-sequences.
         if result and shifted_sequence:

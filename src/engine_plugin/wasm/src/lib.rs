@@ -251,13 +251,23 @@ pub fn modify_paths(
         .map(|(i, _)| i)
         .collect();
 
-    // Build the shifted sub-sequence with synthesized travel moves.
+    // Build the shifted sub-sequence. Synthesize retracted travel between
+    // consecutive shifted walls whenever their endpoints don't connect —
+    // this covers both intra-group gaps (unshifted walls between two shifted
+    // walls in the same group) and inter-group gaps.
+    //
+    // Original travel paths between walls are intentionally NOT carried over.
+    // Carrying them over marks them in `shifted_indices`, removing them from
+    // normal-Z and leaving gaps that CuraEngine fills with spurious extrusion.
+    // Leaving them in normal-Z is safe: they are MOVE features, so the nozzle
+    // traverses the removed wall's footprint as travel (no extrusion artifact).
     let mut shifted_sequence: Vec<proto::GCodePath> = Vec::new();
     for &gi in &groups_with_shifts {
         let group = &groups[gi];
         for &idx in group {
             if shifted_indices[idx] {
-                // Insert travel if the previous shifted wall ends at a different position
+                // Synthesize retracted travel whenever the shifted sequence ends
+                // with a wall whose endpoint doesn't match this wall's start.
                 if let Some(prev) = shifted_sequence.last() {
                     if !is_move_feature(prev.feature) {
                         let prev_end = prev.path.as_ref().and_then(|p| p.path.last());
@@ -274,11 +284,80 @@ pub fn modify_paths(
         }
     }
 
-    // Normal-Z sub-sequence: all non-shifted paths in their original order.
-    let mut result: Vec<proto::GCodePath> = paths.into_iter().enumerate()
+    // Normal-Z sub-sequence: all non-shifted paths, retaining their original indices.
+    let normal_z_indexed: Vec<(usize, proto::GCodePath)> = paths.into_iter().enumerate()
         .filter(|(idx, _)| !shifted_indices[*idx])
-        .map(|(_, p)| p)
         .collect();
+
+    // Phase 3b: Fill gaps in normal-Z created by removing shifted walls.
+    //
+    // When CuraEngine places two extrusion paths with no explicit travel between
+    // them (combing / no z-hop), and a shifted wall sat between them in the
+    // original sequence, removing that wall leaves the two paths adjacent in
+    // normal-Z with mismatched endpoints. CuraEngine would extrude across the
+    // gap → spurious green line in preview.
+    //
+    // We detect the gap by original-index distance: if consecutive normal-Z paths
+    // have original indices i and j with j > i+1, something was removed between
+    // them (by construction, only shifted walls can be removed from normal-Z).
+    // Insert a MOVERETRACTED travel (z_offset=0 — stays at normal layer Z) to
+    // bridge those mismatched endpoints.
+    //
+    // If originally adjacent (j == i+1), CuraEngine placed them back-to-back on
+    // purpose (combing); do NOT insert a spurious travel.
+    let mut result: Vec<proto::GCodePath> = Vec::with_capacity(normal_z_indexed.len() + 16);
+    let mut prev_state: Option<(usize, bool, proto::Point3D)> = None;
+    // (original_index, is_extrusion, last_endpoint)
+
+    for (orig_idx, path) in normal_z_indexed {
+        if let Some((prev_orig_idx, prev_is_extr, ref prev_end)) = prev_state {
+            if orig_idx > prev_orig_idx + 1 {   // a shifted wall was removed between them
+                if prev_is_extr && !is_move_feature(path.feature) {
+                    // Case A: extrusion → gap → extrusion
+                    // No explicit travel between them; synthesize one.
+                    let cur_start = path.path.as_ref().and_then(|p| p.path.first());
+                    if let Some(cs) = cur_start {
+                        if prev_end.x != cs.x || prev_end.y != cs.y {
+                            result.push(proto::GCodePath {
+                                feature: MOVERETRACTED,
+                                retract: true,
+                                path: Some(proto::OpenPath {
+                                    path: vec![prev_end.clone(), cs.clone()],
+                                }),
+                                z_offset: 0,
+                                speed_derivatives: ref_speed.clone(),
+                                speed_factor: ref_speed_factor,
+                                layer_thickness: ref_layer_thickness,
+                                mesh_name: path.mesh_name.clone(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                } else if !prev_is_extr && !is_move_feature(path.feature) {
+                    // Case B: travel → gap → extrusion
+                    // The travel's last point was the shifted wall's start; redirect
+                    // it to the next extrusion's start so the head arrives correctly.
+                    let cur_start = path.path.as_ref().and_then(|p| p.path.first()).cloned();
+                    if let Some(cs) = cur_start {
+                        if prev_end.x != cs.x || prev_end.y != cs.y {
+                            if let Some(last_travel) = result.last_mut() {
+                                if let Some(tp) = last_travel.path.as_mut() {
+                                    if let Some(last_pt) = tp.path.last_mut() {
+                                        *last_pt = cs;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let new_end = path.path.as_ref().and_then(|p| p.path.last()).cloned()
+            .unwrap_or_default();
+        let is_extr = !is_move_feature(path.feature);
+        prev_state = Some((orig_idx, is_extr, new_end));
+        result.push(path);
+    }
 
     // Synthesize retracted travel between normal-Z and shifted-Z sub-sequences.
     if let (Some(last_normal), Some(first_shifted)) = (result.last(), shifted_sequence.first()) {

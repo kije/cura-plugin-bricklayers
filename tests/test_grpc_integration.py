@@ -498,7 +498,7 @@ class TestGCodePathsModifyRPC:
         result = list(resp.gcode_paths)
         # All original paths present; synthesized travels may be added
         original_features = sorted(p.feature for p in paths)
-        result_features = sorted(p.feature for p in result if p.feature != MOVERETRACTED or p.z_offset == 0)
+        result_features = sorted(p.feature for p in result if not (p.feature == MOVERETRACTED and p.retract))
         assert result_features == original_features
         # After reorder: all normal-Z first, then shifted
         shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
@@ -518,8 +518,8 @@ class TestGCodePathsModifyRPC:
         result = list(resp.gcode_paths)
         wall_count = sum(1 for p in result if p.feature == INNERWALL)
         assert wall_count == 6
-        # Any extra paths must be synthesized retracted travels
-        extra = [p for p in result if p.feature == MOVERETRACTED and p.z_offset > 0]
+        # Any extra paths must be synthesized retracted travels (shifted-Z or gap-fill)
+        extra = [p for p in result if p.feature == MOVERETRACTED]
         assert len(result) == 6 + len(extra)
 
     def test_response_preserves_all_feature_types(self, server, modify_stub):
@@ -813,7 +813,7 @@ class TestInnermostWallProtection:
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
         shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
-        unshifted = [p for p in result if p.z_offset == 0]
+        unshifted = [p for p in result if p.z_offset == 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert shifted[0].z_offset == 100  # layer_height=200, shift=100
         assert len(unshifted) == 2  # wall[0] + innermost wall[2]
@@ -867,7 +867,7 @@ class TestInnermostWallProtection:
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
         shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
-        unshifted = [p for p in result if p.z_offset == 0]
+        unshifted = [p for p in result if p.z_offset == 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert len(unshifted) == 2
 
@@ -1118,7 +1118,8 @@ class TestZLevelReordering:
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
         # Normal-Z group: OUTERWALL, INNERWALL, INNERWALL(innermost), INFILL
-        normal_z = [p for p in result if p.z_offset == 0]
+        # (gap-fill MOVERETRACTED travels at z_offset=0 are excluded)
+        normal_z = [p for p in result if p.z_offset == 0 and p.feature != MOVERETRACTED]
         features = [p.feature for p in normal_z]
         assert features == [OUTERWALL, INNERWALL, INNERWALL, INFILL]
 
@@ -1138,7 +1139,7 @@ class TestZLevelReordering:
         original_features = sorted(p.feature for p in paths)
         result_non_travel = sorted(
             p.feature for p in result
-            if not (p.feature == MOVERETRACTED and p.z_offset > 0 and p.retract)
+            if not (p.feature == MOVERETRACTED and p.retract)
         )
         assert result_non_travel == original_features
 

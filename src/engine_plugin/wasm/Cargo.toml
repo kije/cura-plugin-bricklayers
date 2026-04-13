@@ -13,3 +13,7 @@ prost = "0.13"
 
 [build-dependencies]
 prost-build = "0.13"
+
+[profile.release]
+strip = true  # Automatically strip symbols from the binary.
+opt-level = "z"  # Optimize for size.
