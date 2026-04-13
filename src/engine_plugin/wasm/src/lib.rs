@@ -116,21 +116,56 @@ pub fn modify_paths(
     //
     // CuraEngine inserts travel/retraction paths between wall loops of
     // the same contour. We tolerate those gaps: a group is a maximal
-    // run of target-wall indices separated only by move-type paths.
+    // run of target-wall indices separated only by move-type paths
+    // *within the same mesh*. A change in mesh_name signals an
+    // inter-object boundary and breaks the group. Paths with empty
+    // mesh_name are outside the per-mesh context (skirt, brim, support,
+    // prime tower) and must not be grouped.
     let is_target = |f: i32| -> bool {
         (target_inner && f == INNERWALL) || (target_outer && f == OUTERWALL)
     };
 
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut current_group: Vec<usize> = Vec::new();
+    let mut current_group_mesh = String::new();
     for (i, p) in paths.iter().enumerate() {
         if is_target(p.feature) {
-            current_group.push(i);
+            if p.mesh_name.is_empty() {
+                // Outside-mesh wall — flush and skip (passthrough)
+                if !current_group.is_empty() {
+                    groups.push(std::mem::take(&mut current_group));
+                    current_group_mesh = String::new();
+                }
+            } else if !current_group.is_empty() && p.mesh_name != current_group_mesh {
+                // Wall from a different mesh → break group, start new one
+                groups.push(std::mem::take(&mut current_group));
+                current_group.push(i);
+                current_group_mesh = p.mesh_name.clone();
+            } else {
+                // Same mesh (or first wall in new group)
+                current_group.push(i);
+                if current_group_mesh.is_empty() {
+                    current_group_mesh = p.mesh_name.clone();
+                }
+            }
         } else if is_move_feature(p.feature) {
-            // tolerate travel gaps inside a group
+            if !current_group.is_empty() {
+                if p.mesh_name.is_empty() {
+                    // Outside-mesh travel inside active group → break
+                    groups.push(std::mem::take(&mut current_group));
+                    current_group_mesh = String::new();
+                } else if p.mesh_name != current_group_mesh {
+                    // Inter-object travel (destination mesh ≠ group's mesh) → break
+                    groups.push(std::mem::take(&mut current_group));
+                    current_group_mesh = String::new();
+                }
+                // else: same-mesh move, tolerate
+            }
         } else {
+            // Any other feature (INFILL, SKIN, SUPPORT, …) → break
             if !current_group.is_empty() {
                 groups.push(std::mem::take(&mut current_group));
+                current_group_mesh = String::new();
             }
         }
     }
@@ -169,18 +204,54 @@ pub fn modify_paths(
         }
     }
 
-    // Phase 3: Stable partition — normal-Z paths first, shifted paths second.
-    let mut normal_z: Vec<proto::GCodePath> = Vec::new();
-    let mut shifted_z: Vec<proto::GCodePath> = Vec::new();
-    for (idx, path) in paths.into_iter().enumerate() {
-        if shifted_indices[idx] {
-            shifted_z.push(path);
-        } else {
-            normal_z.push(path);
+    // Phase 3: Global partition — normal-Z first (all objects), shifted-Z second (all objects).
+    //
+    // All paths at layer-Z print together across all objects (one Z per layer),
+    // then all shifted paths print together. This minimises Z oscillation.
+    //
+    // The shifted group needs inter-object travel/retraction moves cloned from the
+    // original sequence; without them the nozzle would extrude while crossing between
+    // objects. Cloned moves get z_offset += z_shift so the nozzle stays elevated
+    // during inter-object travel (no unnecessary Z down/up between shifted walls).
+
+    // Indices of groups that have at least one shifted wall.
+    let groups_with_shifts: Vec<usize> = groups.iter().enumerate()
+        .filter(|(_, g)| g.iter().any(|&idx| shifted_indices[idx]))
+        .map(|(i, _)| i)
+        .collect();
+
+    // Build the shifted sub-sequence, inserting elevated MOVE clones between
+    // consecutive shifted groups to preserve inter-object travel.
+    let mut shifted_sequence: Vec<proto::GCodePath> = Vec::new();
+    for (part_idx, &gi) in groups_with_shifts.iter().enumerate() {
+        let group = &groups[gi];
+        for &idx in group {
+            if shifted_indices[idx] {
+                shifted_sequence.push(paths[idx].clone());
+            }
+        }
+        if part_idx + 1 < groups_with_shifts.len() {
+            let next_gi = groups_with_shifts[part_idx + 1];
+            let cur_last  = *groups[gi].last().unwrap();
+            let next_first = groups[next_gi][0];
+            // Clone MOVE paths between the two groups, elevated to shifted Z.
+            for i in (cur_last + 1)..next_first {
+                if is_move_feature(paths[i].feature) {
+                    let mut cloned = paths[i].clone();
+                    cloned.z_offset += z_shift;
+                    shifted_sequence.push(cloned);
+                }
+            }
         }
     }
-    normal_z.extend(shifted_z);
-    normal_z
+
+    // Normal-Z sub-sequence: all non-shifted paths in their original order.
+    let mut result: Vec<proto::GCodePath> = paths.into_iter().enumerate()
+        .filter(|(idx, _)| !shifted_indices[*idx])
+        .map(|(_, p)| p)
+        .collect();
+    result.extend(shifted_sequence);
+    result
 }
 
 // -----------------------------------------------------------------------

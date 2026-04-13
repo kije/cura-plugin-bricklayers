@@ -88,14 +88,21 @@ def _make_path(
     layer_thickness: int = 200,
     flow_ratio: float = 1.0,
     line_width: int = 400,
+    mesh_name: str = "Mesh",
 ) -> gcode_path_pb2.GCodePath:
-    """Construct a GCodePath protobuf message for use in tests."""
+    """Construct a GCodePath protobuf message for use in tests.
+
+    Default mesh_name="Mesh" models real CuraEngine output where wall/infill
+    paths always carry a non-empty mesh name.  Set mesh_name="" explicitly to
+    test outside-mesh paths (skirt, brim, support, prime tower).
+    """
     path = gcode_path_pb2.GCodePath(
         feature=feature,
         z_offset=z_offset,
         layer_thickness=layer_thickness,
         flow_ratio=flow_ratio,
         line_width=line_width,
+        mesh_name=mesh_name,
     )
     for i in range(n_points):
         path.path.path.append(
@@ -1024,7 +1031,8 @@ class TestZLevelReordering:
                 assert False, "Normal-Z path found after shifted path"
 
     def test_non_wall_paths_in_normal_z_group(self, server, modify_stub):
-        """OUTERWALL + 3 INNERWALL + INFILL: infill must appear before shifted walls."""
+        """OUTERWALL + 3 INNERWALL + INFILL: within wall paths, normal-Z walls
+        precede shifted walls.  Non-wall paths (infill) retain original position."""
         paths = [
             _make_path(OUTERWALL),
             _make_path(INNERWALL),
@@ -1034,13 +1042,56 @@ class TestZLevelReordering:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        # All non-shifted paths (including infill) must come before shifted
-        saw_shifted = False
+        # Within wall paths, normal-Z must precede shifted
+        saw_shifted_wall = False
         for p in result:
-            if p.z_offset > 0:
-                saw_shifted = True
-            elif saw_shifted:
-                assert False, f"Non-shifted path (feature={p.feature}) after shifted path"
+            is_wall = p.feature in (INNERWALL, OUTERWALL)
+            if is_wall and p.z_offset > 0:
+                saw_shifted_wall = True
+            elif is_wall and saw_shifted_wall:
+                assert False, f"Normal-Z wall after shifted wall"
+
+    def test_inter_object_travel_preserved(self, server, modify_stub):
+        """Shifted walls from different objects must be separated by a travel
+        path in the shifted sub-sequence — otherwise the nozzle extrudes while
+        crossing between objects.
+        The shifted sub-sequence is global (all objects): normal-Z walls of all
+        objects print first, then shifted walls of all objects, with inter-object
+        travel cloned (at shifted Z) between them."""
+        paths = [
+            _make_path(OUTERWALL),      # obj1 outer
+            _make_path(INNERWALL),      # obj1 inner (shifted)
+            _make_path(INNERWALL),      # obj1 inner (innermost)
+            _make_path(MOVERETRACTED),  # travel between objects
+            _make_path(OUTERWALL),      # obj2 outer
+            _make_path(INNERWALL),      # obj2 inner (shifted)
+            _make_path(INNERWALL),      # obj2 inner (innermost)
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # Two shifted WALL paths (one per object) — exclude elevated MOVE clones
+        shifted_walls = [
+            (i, p) for i, p in enumerate(result)
+            if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)
+        ]
+        assert len(shifted_walls) == 2, (
+            f"Expected 2 shifted wall paths, got {len(shifted_walls)}: "
+            f"{[(i, p.feature, p.z_offset) for i, p in shifted_walls]}"
+        )
+
+        # A travel path must exist between the two shifted walls in the output
+        travel_between = next(
+            (i for i, p in enumerate(result)
+             if p.feature == MOVERETRACTED
+             and shifted_walls[0][0] < i < shifted_walls[1][0]),
+            None,
+        )
+        assert travel_between is not None, (
+            f"No travel path found between shifted walls at positions "
+            f"{shifted_walls[0][0]} and {shifted_walls[1][0]}; "
+            f"result features: {[p.feature for p in result]}"
+        )
 
     def test_relative_order_preserved_within_normal_z(self, server, modify_stub):
         """Normal-Z paths preserve their original relative order."""
@@ -1089,3 +1140,475 @@ class TestZLevelReordering:
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
         assert [p.feature for p in result] == [SKIN, INFILL, SUPPORT]
+
+
+# ===========================================================================
+# MESH-NAME BOUNDARY DETECTION TESTS
+# ===========================================================================
+
+class TestMeshNameBoundary:
+    """Phase 1 grouping must use mesh_name to detect inter-object boundaries.
+
+    With GroupOuter=True, CuraEngine groups outer walls from all objects
+    together, then inner walls. The inter-object MOVERETRACTED between
+    inner wall groups carries the destination mesh's name. Without
+    mesh_name tracking, all inner walls merge into one group and Phase 3
+    emits shifted walls with no inter-object travel (the green-lines bug).
+    """
+
+    def test_group_outer_two_objects_correct_partition(self, server, modify_stub):
+        """GroupOuter=True: two objects, each with outer + 2 inner walls.
+        Inter-object MOVERETRACTED carries destination mesh_name.
+        Expected: two separate inner wall groups → travel clone in shifted pass."""
+        server.settings.apply_outer_walls = True
+        server.settings.apply_inner_walls = True
+        server.settings.inset_direction = "outside_in"
+        paths = [
+            _make_path(OUTERWALL, mesh_name="A"),      # obj1 outer
+            _make_path(MOVERETRACTED, mesh_name="A"),   # intra-obj travel
+            _make_path(OUTERWALL, mesh_name="B"),       # obj2 outer
+            _make_path(MOVERETRACTED, mesh_name="B"),   # intra-obj travel
+            _make_path(INNERWALL, mesh_name="A"),       # obj1 inner (will shift)
+            _make_path(INNERWALL, mesh_name="A"),       # obj1 inner (innermost)
+            _make_path(MOVERETRACTED, mesh_name="B"),   # inter-object travel → dest=B
+            _make_path(INNERWALL, mesh_name="B"),       # obj2 inner (will shift)
+            _make_path(INNERWALL, mesh_name="B"),       # obj2 inner (innermost)
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # Shifted wall paths (exclude elevated MOVE clones)
+        shifted_walls = [
+            (i, p) for i, p in enumerate(result)
+            if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)
+        ]
+        # Two outer walls shifted + two inner walls shifted = depends on grouping
+        # With outside_in: outer group has [O_A, O_B] but they are different meshes
+        # → split into two single-wall groups → no shift (len < 2)
+        # Inner groups: [I_A, I_A] → 1 shifted, [I_B, I_B] → 1 shifted
+        inner_shifted = [(i, p) for i, p in shifted_walls if p.feature == INNERWALL]
+        assert len(inner_shifted) == 2, (
+            f"Expected 2 shifted inner walls, got {len(inner_shifted)}"
+        )
+
+        # A travel path must exist between the two shifted inner walls
+        if len(inner_shifted) == 2:
+            travel_between = [
+                (i, p) for i, p in enumerate(result)
+                if p.feature == MOVERETRACTED
+                and inner_shifted[0][0] < i < inner_shifted[1][0]
+                and p.z_offset > 0
+            ]
+            assert len(travel_between) >= 1, (
+                "No elevated travel between shifted inner walls from different objects"
+            )
+
+    def test_empty_mesh_name_move_breaks_group(self, server, modify_stub):
+        """A MOVERETRACTED with mesh_name='' inside an active group breaks it.
+        Empty mesh_name means outside the per-mesh context (conservative guard)."""
+        paths = [
+            _make_path(INNERWALL, mesh_name="A"),       # group 1
+            _make_path(INNERWALL, mesh_name="A"),       # group 1 (innermost)
+            _make_path(MOVERETRACTED, mesh_name=""),    # outside-mesh travel → break
+            _make_path(INNERWALL, mesh_name="B"),       # group 2
+            _make_path(INNERWALL, mesh_name="B"),       # group 2 (innermost)
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # Two groups of 2 walls each → 1 shifted per group
+        shifted = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted) == 2, f"Expected 2 shifted walls, got {len(shifted)}"
+
+    def test_empty_mesh_name_wall_not_shifted(self, server, modify_stub):
+        """A target-wall path with mesh_name='' must not be shifted (passthrough).
+        In real CuraEngine output this cannot happen (wall paths always have
+        non-empty mesh_name), but it's a defensive guard."""
+        paths = [
+            _make_path(INNERWALL, mesh_name="A"),       # group member
+            _make_path(INNERWALL, mesh_name=""),        # outside-mesh wall → flushes group
+            _make_path(INNERWALL, mesh_name="A"),       # new group start
+            _make_path(INNERWALL, mesh_name="A"),       # same group (innermost)
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # The empty mesh_name wall must not be shifted
+        ghost_walls = [p for p in result if p.mesh_name == "" and p.feature == INNERWALL]
+        assert len(ghost_walls) == 1
+        assert ghost_walls[0].z_offset == 0, "Wall with empty mesh_name must not be shifted"
+
+    def test_same_mesh_travel_tolerated(self, server, modify_stub):
+        """MOVERETRACTED with same mesh_name as current group is tolerated."""
+        paths = [
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="A"),   # same mesh → tolerate
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),       # innermost
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # All 3 walls form one group → 1 shifted
+        shifted = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted) == 1
+
+    def test_inter_object_move_breaks_group(self, server, modify_stub):
+        """MOVERETRACTED with different mesh_name breaks the group."""
+        paths = [
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),       # innermost for group 1
+            _make_path(MOVERETRACTED, mesh_name="B"),   # inter-object → break
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),       # innermost for group 2
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # Two groups → 2 shifted walls
+        shifted = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted) == 2
+
+    def test_wall_mesh_change_without_travel_breaks_group(self, server, modify_stub):
+        """Consecutive target walls with different mesh_name must form separate groups."""
+        paths = [
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),       # innermost group 1
+            _make_path(INNERWALL, mesh_name="B"),       # different mesh → new group
+            _make_path(INNERWALL, mesh_name="B"),       # innermost group 2
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted) == 2
+
+
+# ===========================================================================
+# ALL 8 PERMUTATION TESTS (Wall Ordering × InfillFirst × GroupOuter)
+# ===========================================================================
+
+class TestToolpathPermutations:
+    """Validate correct path ordering for all permutations of:
+    - Wall Ordering: outside_in / inside_out
+    - Print Infill before walls: True / False
+    - Group outer walls (apply_outer_walls): True / False
+
+    Two objects on the plate, each with 1 outer + 2 inner walls.
+    Key assertion: all normal-Z paths print before any shifted-Z path,
+    and inter-object travel is preserved as an elevated clone in the
+    shifted pass.
+    """
+
+    def _assert_z_monotonic(self, result):
+        """All normal-Z paths must precede all shifted-Z paths."""
+        saw_shifted = False
+        for p in result:
+            if p.z_offset > 0:
+                saw_shifted = True
+            elif saw_shifted and p.feature not in (
+                MOVERETRACTED, MOVEUNRETRACTED,
+            ):
+                # Allow move paths at z=0 in normal pass before shifted starts
+                # But no wall/infill/skin at z=0 after a shifted wall
+                if p.feature in (INNERWALL, OUTERWALL, INFILL, SKIN):
+                    return False
+        return True
+
+    def _build_outside_in_infill_first_no_group_outer(self):
+        """Permutation 1: O→I, Infill first, GroupOuter=False.
+        CuraEngine order: INFILL, O₁, I₁_s, I₁_i, T, O₂, I₂_s, I₂_i"""
+        return [
+            _make_path(INFILL, mesh_name="A"),
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),       # will shift
+            _make_path(INNERWALL, mesh_name="A"),       # innermost
+            _make_path(MOVERETRACTED, mesh_name="B"),   # inter-object travel
+            _make_path(OUTERWALL, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),       # will shift
+            _make_path(INNERWALL, mesh_name="B"),       # innermost
+        ]
+
+    def _build_outside_in_infill_last_no_group_outer(self):
+        """Permutation 2: O→I, Infill last, GroupOuter=False.
+        CuraEngine order: O₁, I₁_s, I₁_i, T, O₂, I₂_s, I₂_i, INFILL"""
+        return [
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(OUTERWALL, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INFILL, mesh_name="B"),
+        ]
+
+    def _build_inside_out_infill_first_no_group_outer(self):
+        """Permutation 3: I→O, Infill first, GroupOuter=False.
+        CuraEngine order: INFILL, I₁_i, I₁_s, O₁, T, I₂_i, I₂_s, O₂"""
+        return [
+            _make_path(INFILL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),       # innermost (first in I→O)
+            _make_path(INNERWALL, mesh_name="A"),       # will shift
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),       # innermost
+            _make_path(INNERWALL, mesh_name="B"),       # will shift
+            _make_path(OUTERWALL, mesh_name="B"),
+        ]
+
+    def _build_inside_out_infill_last_no_group_outer(self):
+        """Permutation 4: I→O, Infill last, GroupOuter=False.
+        CuraEngine order: I₁_i, I₁_s, O₁, T, I₂_i, I₂_s, O₂, INFILL"""
+        return [
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(OUTERWALL, mesh_name="B"),
+            _make_path(INFILL, mesh_name="B"),
+        ]
+
+    def _build_outside_in_infill_first_group_outer(self):
+        """Permutation 5: O→I, Infill first, GroupOuter=True.
+        CuraEngine groups outers: INFILL, O₁, T₁, O₂, T₂, I₁_s, I₁_i, T₃, I₂_s, I₂_i"""
+        return [
+            _make_path(INFILL, mesh_name="A"),
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),   # T₁ → dest=B
+            _make_path(OUTERWALL, mesh_name="B"),
+            _make_path(MOVERETRACTED, mesh_name="A"),   # T₂ → back to A's inners
+            _make_path(INNERWALL, mesh_name="A"),       # will shift
+            _make_path(INNERWALL, mesh_name="A"),       # innermost
+            _make_path(MOVERETRACTED, mesh_name="B"),   # T₃ → inter-object
+            _make_path(INNERWALL, mesh_name="B"),       # will shift
+            _make_path(INNERWALL, mesh_name="B"),       # innermost
+        ]
+
+    def _build_outside_in_infill_last_group_outer(self):
+        """Permutation 6: O→I, Infill last, GroupOuter=True.
+        CuraEngine: O₁, T₁, O₂, T₂, I₁_s, I₁_i, T₃, I₂_s, I₂_i, INFILL"""
+        return [
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(OUTERWALL, mesh_name="B"),
+            _make_path(MOVERETRACTED, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INFILL, mesh_name="B"),
+        ]
+
+    def _build_inside_out_infill_first_group_outer(self):
+        """Permutation 7: I→O, Infill first, GroupOuter=True.
+        CuraEngine: INFILL, O₁, T₁, O₂, T₂, I₁_i, I₁_s, T₃, I₂_i, I₂_s"""
+        return [
+            _make_path(INFILL, mesh_name="A"),
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(OUTERWALL, mesh_name="B"),
+            _make_path(MOVERETRACTED, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),       # innermost (first in I→O)
+            _make_path(INNERWALL, mesh_name="A"),       # will shift
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),       # innermost
+            _make_path(INNERWALL, mesh_name="B"),       # will shift
+        ]
+
+    def _build_inside_out_infill_last_group_outer(self):
+        """Permutation 8: I→O, Infill last, GroupOuter=True.
+        CuraEngine: O₁, T₁, O₂, T₂, I₁_i, I₁_s, T₃, I₂_i, I₂_s, INFILL"""
+        return [
+            _make_path(OUTERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(OUTERWALL, mesh_name="B"),
+            _make_path(MOVERETRACTED, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(INNERWALL, mesh_name="A"),
+            _make_path(MOVERETRACTED, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INNERWALL, mesh_name="B"),
+            _make_path(INFILL, mesh_name="B"),
+        ]
+
+    # --- GroupOuter=False (permutations 1–4) ---
+
+    def test_perm1_outside_in_infill_first_no_group_outer(self, server, modify_stub):
+        """O→I, Infill first, GroupOuter=False."""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = False
+        server.settings.inset_direction = "outside_in"
+        paths = self._build_outside_in_infill_first_no_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_walls = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_walls) == 2, f"Expected 2 shifted inner walls, got {len(shifted_walls)}"
+        assert self._assert_z_monotonic(result), "Z not monotonic: normal-Z path after shifted"
+
+        # Verify elevated travel clone between shifted walls
+        shifted_positions = [i for i, p in enumerate(result) if p.z_offset > 0 and p.feature == INNERWALL]
+        if len(shifted_positions) == 2:
+            between = result[shifted_positions[0]+1:shifted_positions[1]]
+            elevated_moves = [p for p in between if p.z_offset > 0 and p.feature == MOVERETRACTED]
+            assert len(elevated_moves) >= 1, "Missing elevated travel between shifted walls"
+
+    def test_perm2_outside_in_infill_last_no_group_outer(self, server, modify_stub):
+        """O→I, Infill last, GroupOuter=False."""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = False
+        server.settings.inset_direction = "outside_in"
+        paths = self._build_outside_in_infill_last_no_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_walls = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_walls) == 2
+        assert self._assert_z_monotonic(result)
+
+    def test_perm3_inside_out_infill_first_no_group_outer(self, server, modify_stub):
+        """I→O, Infill first, GroupOuter=False."""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = False
+        server.settings.inset_direction = "inside_out"
+        paths = self._build_inside_out_infill_first_no_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_walls = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_walls) == 2
+        assert self._assert_z_monotonic(result)
+
+    def test_perm4_inside_out_infill_last_no_group_outer(self, server, modify_stub):
+        """I→O, Infill last, GroupOuter=False."""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = False
+        server.settings.inset_direction = "inside_out"
+        paths = self._build_inside_out_infill_last_no_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_walls = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_walls) == 2
+        assert self._assert_z_monotonic(result)
+
+    # --- GroupOuter=True (permutations 5–8) ---
+
+    def test_perm5_outside_in_infill_first_group_outer(self, server, modify_stub):
+        """O→I, Infill first, GroupOuter=True.
+        Expected: INFILL, O₁, T₁, O₂, T₂, I₁_i, T₃, I₂_i, [I₁_s↑, T₃↑, I₂_s↑]"""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = True
+        server.settings.inset_direction = "outside_in"
+        paths = self._build_outside_in_infill_first_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # Inner walls: 2 shifted (one per object)
+        shifted_inner = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_inner) == 2, f"Expected 2 shifted inner walls, got {len(shifted_inner)}"
+        assert self._assert_z_monotonic(result)
+
+        # Elevated travel between shifted inner walls
+        shifted_positions = [i for i, p in enumerate(result) if p.z_offset > 0 and p.feature == INNERWALL]
+        if len(shifted_positions) == 2:
+            between = result[shifted_positions[0]+1:shifted_positions[1]]
+            elevated_moves = [p for p in between if p.z_offset > 0]
+            assert len(elevated_moves) >= 1, "Missing elevated travel between shifted inner walls"
+
+    def test_perm6_outside_in_infill_last_group_outer(self, server, modify_stub):
+        """O→I, Infill last, GroupOuter=True."""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = True
+        server.settings.inset_direction = "outside_in"
+        paths = self._build_outside_in_infill_last_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_inner = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_inner) == 2
+        assert self._assert_z_monotonic(result)
+
+    def test_perm7_inside_out_infill_first_group_outer(self, server, modify_stub):
+        """I→O, Infill first, GroupOuter=True."""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = True
+        server.settings.inset_direction = "inside_out"
+        paths = self._build_inside_out_infill_first_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_inner = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_inner) == 2
+        assert self._assert_z_monotonic(result)
+
+    def test_perm8_inside_out_infill_last_group_outer(self, server, modify_stub):
+        """I→O, Infill last, GroupOuter=True."""
+        server.settings.apply_inner_walls = True
+        server.settings.apply_outer_walls = True
+        server.settings.inset_direction = "inside_out"
+        paths = self._build_inside_out_infill_last_group_outer()
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_inner = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_inner) == 2
+        assert self._assert_z_monotonic(result)
+
+    # --- Shared assertions for all permutations ---
+
+    def test_all_perms_infill_never_shifted(self, server, modify_stub):
+        """Across all 8 permutations, INFILL paths must never be shifted."""
+        builders = [
+            self._build_outside_in_infill_first_no_group_outer,
+            self._build_outside_in_infill_last_no_group_outer,
+            self._build_inside_out_infill_first_no_group_outer,
+            self._build_inside_out_infill_last_no_group_outer,
+            self._build_outside_in_infill_first_group_outer,
+            self._build_outside_in_infill_last_group_outer,
+            self._build_inside_out_infill_first_group_outer,
+            self._build_inside_out_infill_last_group_outer,
+        ]
+        for idx, builder in enumerate(builders):
+            # GroupOuter=True for permutations 5-8
+            is_group_outer = idx >= 4
+            server.settings.apply_outer_walls = is_group_outer
+            server.settings.apply_inner_walls = True
+            server.settings.inset_direction = (
+                "inside_out" if idx in (2, 3, 6, 7) else "outside_in"
+            )
+            paths = builder()
+            resp = modify_stub.Call(_call_request(paths))
+            result = list(resp.gcode_paths)
+            for p in result:
+                if p.feature == INFILL:
+                    assert p.z_offset == 0, (
+                        f"Permutation {idx+1}: INFILL path shifted (z_offset={p.z_offset})"
+                    )
+
+    def test_all_perms_outer_walls_never_shifted_when_not_targeted(self, server, modify_stub):
+        """With GroupOuter=False, outer walls must never be shifted."""
+        builders = [
+            self._build_outside_in_infill_first_no_group_outer,
+            self._build_outside_in_infill_last_no_group_outer,
+            self._build_inside_out_infill_first_no_group_outer,
+            self._build_inside_out_infill_last_no_group_outer,
+        ]
+        for idx, builder in enumerate(builders):
+            server.settings.apply_outer_walls = False
+            server.settings.apply_inner_walls = True
+            server.settings.inset_direction = (
+                "inside_out" if idx in (2, 3) else "outside_in"
+            )
+            paths = builder()
+            resp = modify_stub.Call(_call_request(paths))
+            result = list(resp.gcode_paths)
+            for p in result:
+                if p.feature == OUTERWALL:
+                    assert p.z_offset == 0, (
+                        f"Permutation {idx+1}: OUTERWALL shifted when not targeted"
+                    )

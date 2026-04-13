@@ -220,11 +220,13 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
 
         # Phase 1: Collect groups of target wall path indices.
         #
-        # CuraEngine often inserts travel/retraction paths (MOVEUNRETRACTED,
-        # MOVERETRACTED, etc.) between wall loops of the same contour.
-        # We tolerate those gaps: a group is a maximal run of target-wall
-        # indices separated only by move-type paths.  A non-move, non-target
-        # feature (SKIN, INFILL, SUPPORT, …) ends the group.
+        # CuraEngine inserts travel/retraction paths between wall loops of
+        # the same contour. We tolerate those gaps: a group is a maximal
+        # run of target-wall indices separated only by move-type paths
+        # *within the same mesh*. A change in mesh_name signals an
+        # inter-object boundary and breaks the group. Paths with empty
+        # mesh_name are outside the per-mesh context (skirt, brim, support,
+        # prime tower) and must not be grouped.
         move_features = {
             printfeatures_pb2.NONETYPE,
             printfeatures_pb2.MOVEUNRETRACTED,
@@ -236,15 +238,44 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
 
         groups = []          # each group is a list of indices into `paths`
         current_group = []
+        current_group_mesh = ""
         for i, p in enumerate(paths):
             if p.feature in target_features:
-                current_group.append(i)
+                if not p.mesh_name:
+                    # Outside-mesh wall — flush and skip (passthrough)
+                    if current_group:
+                        groups.append(current_group)
+                        current_group = []
+                        current_group_mesh = ""
+                elif current_group and p.mesh_name != current_group_mesh:
+                    # Wall from a different mesh → break group, start new one
+                    groups.append(current_group)
+                    current_group = [i]
+                    current_group_mesh = p.mesh_name
+                else:
+                    # Same mesh (or first wall in new group)
+                    current_group.append(i)
+                    if not current_group_mesh:
+                        current_group_mesh = p.mesh_name
             elif p.feature in move_features:
-                pass          # tolerate travel gaps inside a group
+                if current_group:
+                    if not p.mesh_name:
+                        # Outside-mesh travel inside active group → break
+                        groups.append(current_group)
+                        current_group = []
+                        current_group_mesh = ""
+                    elif p.mesh_name != current_group_mesh:
+                        # Inter-object travel → break
+                        groups.append(current_group)
+                        current_group = []
+                        current_group_mesh = ""
+                    # else: same-mesh move, tolerate
             else:
+                # Any other feature → break
                 if current_group:
                     groups.append(current_group)
                     current_group = []
+                    current_group_mesh = ""
         if current_group:
             groups.append(current_group)
 
@@ -271,17 +302,47 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
                     shifted_indices.add(idx)
                 wall_counter += 1
 
-        # Phase 3: Stable partition — normal-Z paths first, shifted paths second
-        normal_z = [p for i, p in enumerate(paths) if i not in shifted_indices]
-        shifted_z = [p for i, p in enumerate(paths) if i in shifted_indices]
-        result = normal_z + shifted_z
+        # Phase 3: Global partition — normal-Z first (all objects), shifted-Z second.
+        #
+        # All layer-Z paths across all objects print together, then all shifted paths.
+        # This yields one Z lift per layer (not one per object).
+        #
+        # The shifted sub-sequence needs inter-object MOVE paths cloned from the
+        # original, elevated by z_shift, so the nozzle stays up during inter-object
+        # travel and doesn't extrude across the build plate.
+        groups_with_shifts = [
+            gi for gi, g in enumerate(groups)
+            if any(i in shifted_indices for i in g)
+        ]
+
+        shifted_sequence = []
+        for part_idx, gi in enumerate(groups_with_shifts):
+            group = groups[gi]
+            for idx in group:
+                if idx in shifted_indices:
+                    shifted_sequence.append(paths[idx])
+            if part_idx + 1 < len(groups_with_shifts):
+                next_gi = groups_with_shifts[part_idx + 1]
+                cur_last = group[-1]
+                next_first = groups[next_gi][0]
+                # Clone MOVE paths between the two groups, elevated to shifted Z.
+                for i in range(cur_last + 1, next_first):
+                    if paths[i].feature in move_features:
+                        clone = gcode_path_pb2.GCodePath()
+                        clone.CopyFrom(paths[i])
+                        clone.z_offset += z_shift
+                        shifted_sequence.append(clone)
+
+        result = [p for i, p in enumerate(paths) if i not in shifted_indices]
+        result.extend(shifted_sequence)
 
         if shifted_indices:
+            normal_count = len(result) - len(shifted_sequence)
             logger.debug(
                 "Layer %d: shifted %d wall paths (z_shift=%d um, multiplier=%.3f), "
                 "protected %d innermost, reordered %d+%d",
                 layer_nr, len(shifted_indices), z_shift, effective_multiplier,
-                len(groups), len(normal_z), len(shifted_z),
+                len(groups), normal_count, len(shifted_indices),
             )
 
         return result
