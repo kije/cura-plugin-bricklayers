@@ -113,7 +113,7 @@ class BrickLayersEnginePlugin(BackendPlugin):
         prototype_path = os.path.join(plugin_dir, "engine_prototype.py")
         if os.path.isfile(prototype_path):
             Logger.log("d", "BrickLayers: Using Python prototype engine plugin: %s", prototype_path)
-            return [sys.executable, prototype_path]
+            return ["/lsiopy/bin/python3", prototype_path]
 
         Logger.log("w", "BrickLayers: No engine plugin executable found")
         return None
