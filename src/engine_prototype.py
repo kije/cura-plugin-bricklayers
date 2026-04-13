@@ -34,33 +34,36 @@ def _feature_name(feature_int: int) -> str:
 
 
 def _log_call(layer_nr, extruder_nr, req_paths, resp_paths):
-    # Group input paths by (feature, mesh_name, z_offset) → count
-    from collections import Counter
-    in_groups = Counter(
-        (_feature_name(p.feature), p.mesh_name or "", p.z_offset)
-        for p in req_paths
-    )
-    out_groups = Counter(
-        (_feature_name(p.feature), p.mesh_name or "", p.z_offset)
-        for p in resp_paths
-    )
-    record = {
-        "layer_nr": layer_nr,
-        "extruder_nr": extruder_nr,
-        "path_count": len(req_paths),
-        "input_z_shifted": sum(1 for p in req_paths if p.z_offset != 0),
-        "output_z_shifted": sum(1 for p in resp_paths if p.z_offset != 0),
-        "input_groups": [
-            {"feature": f, "mesh": m, "z_offset": z, "count": c}
-            for (f, m, z), c in sorted(in_groups.items())
-        ],
-        "output_groups": [
-            {"feature": f, "mesh": m, "z_offset": z, "count": c}
-            for (f, m, z), c in sorted(out_groups.items())
-        ],
-    }
-    with open(_DEBUG_LOG_PATH, "a") as f:
-        f.write(json.dumps(record) + "\n")
+    """Best-effort diagnostic logging — never fatal."""
+    try:
+        from collections import Counter
+        in_groups = Counter(
+            (_feature_name(p.feature), p.mesh_name or "", p.z_offset)
+            for p in req_paths
+        )
+        out_groups = Counter(
+            (_feature_name(p.feature), p.mesh_name or "", p.z_offset)
+            for p in resp_paths
+        )
+        record = {
+            "layer_nr": layer_nr,
+            "extruder_nr": extruder_nr,
+            "path_count": len(req_paths),
+            "input_z_shifted": sum(1 for p in req_paths if p.z_offset != 0),
+            "output_z_shifted": sum(1 for p in resp_paths if p.z_offset != 0),
+            "input_groups": [
+                {"feature": f, "mesh": m, "z_offset": z, "count": c}
+                for (f, m, z), c in sorted(in_groups.items())
+            ],
+            "output_groups": [
+                {"feature": f, "mesh": m, "z_offset": z, "count": c}
+                for (f, m, z), c in sorted(out_groups.items())
+            ],
+        }
+        with open(_DEBUG_LOG_PATH, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
 
 import grpc
 
@@ -193,6 +196,8 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
     def Call(self, request, context):
         context.send_initial_metadata((
             ("cura-slot-version", SLOT_VERSION),
+            ("cura-plugin-name", PLUGIN_NAME),
+            ("cura-plugin-version", PLUGIN_VERSION),
         ))
 
         layer_nr = request.layer_nr
@@ -213,7 +218,11 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
                 _log_call(layer_nr, extruder_nr, paths, paths)
                 return modify_pb2.CallResponse(gcode_paths=paths)
 
-        modified = self._apply_brick_pattern(paths, layer_nr)
+        try:
+            modified = self._apply_brick_pattern(paths, layer_nr)
+        except Exception as e:
+            logger.warning("Layer %d: brick pattern failed: %s, returning unchanged", layer_nr, e)
+            modified = paths
         _log_call(layer_nr, extruder_nr, paths, modified)
         return modify_pb2.CallResponse(gcode_paths=modified)
 
@@ -354,33 +363,76 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
         # All layer-Z paths across all objects print together, then all shifted paths.
         # This yields one Z lift per layer (not one per object).
         #
-        # The shifted sub-sequence needs inter-object MOVE paths cloned from the
-        # original, elevated by z_shift, so the nozzle stays up during inter-object
-        # travel and doesn't extrude across the build plate.
+        # Between consecutive shifted walls we synthesize retracted travel moves
+        # from the previous wall's endpoint to the next wall's start-point.
+        # This prevents extrusion lines between objects (or non-adjacent walls
+        # within the same object) when the reordering removes intermediate paths.
+        from cura.plugins.v0 import point3d_pb2, polygons_pb2
+
+        def _path_last_point(p):
+            if p.path and p.path.path:
+                return p.path.path[-1]
+            return None
+
+        def _path_first_point(p):
+            if p.path and p.path.path:
+                return p.path.path[0]
+            return None
+
+        # Find a representative travel path from the input to copy speed and
+        # metadata fields from. CuraEngine crashes if synthesized paths lack
+        # speed_derivatives, speed_factor, or mesh_name.
+        ref_travel = next(
+            (p for p in paths if p.feature in move_features and p.HasField('speed_derivatives')),
+            paths[0] if paths else None,
+        )
+        ref_speed_factor = ref_travel.speed_factor if (ref_travel and ref_travel.speed_factor != 0.0) else 1.0
+
+        def _make_travel(from_pt, to_pt, dest_mesh=""):
+            t = gcode_path_pb2.GCodePath()
+            t.feature = printfeatures_pb2.MOVERETRACTED
+            t.retract = True
+            t.z_offset = z_shift
+            t.speed_factor = ref_speed_factor
+            t.layer_thickness = layer_thickness
+            t.mesh_name = dest_mesh
+            if ref_travel and ref_travel.HasField('speed_derivatives'):
+                t.speed_derivatives.CopyFrom(ref_travel.speed_derivatives)
+            t.path.CopyFrom(polygons_pb2.OpenPath(path=[
+                point3d_pb2.Point3D(x=from_pt.x, y=from_pt.y, z=from_pt.z),
+                point3d_pb2.Point3D(x=to_pt.x, y=to_pt.y, z=to_pt.z),
+            ]))
+            return t
+
         groups_with_shifts = [
             gi for gi, g in enumerate(groups)
             if any(i in shifted_indices for i in g)
         ]
 
         shifted_sequence = []
-        for part_idx, gi in enumerate(groups_with_shifts):
+        for gi in groups_with_shifts:
             group = groups[gi]
             for idx in group:
                 if idx in shifted_indices:
+                    # Insert travel if previous shifted wall ends at a different position
+                    if shifted_sequence:
+                        prev = shifted_sequence[-1]
+                        if prev.feature not in move_features:
+                            pe = _path_last_point(prev)
+                            cs = _path_first_point(paths[idx])
+                            if pe and cs and (pe.x != cs.x or pe.y != cs.y):
+                                shifted_sequence.append(_make_travel(pe, cs, paths[idx].mesh_name))
                     shifted_sequence.append(paths[idx])
-            if part_idx + 1 < len(groups_with_shifts):
-                next_gi = groups_with_shifts[part_idx + 1]
-                cur_last = group[-1]
-                next_first = groups[next_gi][0]
-                # Clone MOVE paths between the two groups, elevated to shifted Z.
-                for i in range(cur_last + 1, next_first):
-                    if paths[i].feature in move_features:
-                        clone = gcode_path_pb2.GCodePath()
-                        clone.CopyFrom(paths[i])
-                        clone.z_offset = z_shift
-                        shifted_sequence.append(clone)
 
         result = [p for i, p in enumerate(paths) if i not in shifted_indices]
+
+        # Synthesize retracted travel between normal-Z and shifted-Z sub-sequences.
+        if result and shifted_sequence:
+            le = _path_last_point(result[-1])
+            fs = _path_first_point(shifted_sequence[0])
+            if le and fs:
+                result.append(_make_travel(le, fs, shifted_sequence[0].mesh_name))
+
         result.extend(shifted_sequence)
 
         if shifted_indices:
@@ -398,7 +450,13 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
 def serve(address: str, port: int) -> None:
     settings = BrickSettings()
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=4),
+        options=[
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),     # 100 MB
+        ],
+    )
 
     handshake_pb2_grpc.add_HandshakeServiceServicer_to_server(
         HandshakeServicer(), server

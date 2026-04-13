@@ -210,10 +210,40 @@ pub fn modify_paths(
     // All paths at layer-Z print together across all objects (one Z per layer),
     // then all shifted paths print together. This minimises Z oscillation.
     //
-    // The shifted group needs inter-object travel/retraction moves cloned from the
-    // original sequence; without them the nozzle would extrude while crossing between
-    // objects. Cloned moves get z_offset += z_shift so the nozzle stays elevated
-    // during inter-object travel (no unnecessary Z down/up between shifted walls).
+    // Between consecutive shifted walls we synthesize retracted travel moves
+    // from the previous wall's endpoint to the next wall's start-point.
+    // This prevents extrusion lines between objects (or non-adjacent walls
+    // within the same object) when the reordering removes intermediate paths.
+
+    // Find a representative travel/move path from the input to copy speed and
+    // metadata fields from. CuraEngine crashes (exit code 1) if synthesized
+    // paths lack speed_derivatives, speed_factor, or mesh_name.
+    let ref_travel = paths.iter()
+        .find(|p| is_move_feature(p.feature) && p.speed_derivatives.is_some())
+        .or_else(|| paths.first());
+
+    let ref_speed = ref_travel.and_then(|p| p.speed_derivatives.clone());
+    let ref_speed_factor = ref_travel.map(|p| if p.speed_factor == 0.0 { 1.0 } else { p.speed_factor }).unwrap_or(1.0);
+    let ref_layer_thickness = ref_travel.map(|p| p.layer_thickness).unwrap_or(layer_thickness);
+
+    // Helper: create a retracted travel path between two points at shifted Z.
+    // Copies speed_derivatives and speed_factor from a real path so CuraEngine
+    // can generate valid G-code feedrates.
+    let make_travel = |from: &proto::Point3D, to: &proto::Point3D, dest_mesh: &str| -> proto::GCodePath {
+        proto::GCodePath {
+            feature: MOVERETRACTED,
+            retract: true,
+            path: Some(proto::OpenPath {
+                path: vec![from.clone(), to.clone()],
+            }),
+            z_offset: z_shift,
+            speed_derivatives: ref_speed.clone(),
+            speed_factor: ref_speed_factor,
+            layer_thickness: ref_layer_thickness,
+            mesh_name: dest_mesh.to_string(),
+            ..Default::default()
+        }
+    };
 
     // Indices of groups that have at least one shifted wall.
     let groups_with_shifts: Vec<usize> = groups.iter().enumerate()
@@ -221,27 +251,25 @@ pub fn modify_paths(
         .map(|(i, _)| i)
         .collect();
 
-    // Build the shifted sub-sequence, inserting elevated MOVE clones between
-    // consecutive shifted groups to preserve inter-object travel.
+    // Build the shifted sub-sequence with synthesized travel moves.
     let mut shifted_sequence: Vec<proto::GCodePath> = Vec::new();
-    for (part_idx, &gi) in groups_with_shifts.iter().enumerate() {
+    for &gi in &groups_with_shifts {
         let group = &groups[gi];
         for &idx in group {
             if shifted_indices[idx] {
-                shifted_sequence.push(paths[idx].clone());
-            }
-        }
-        if part_idx + 1 < groups_with_shifts.len() {
-            let next_gi = groups_with_shifts[part_idx + 1];
-            let cur_last  = *groups[gi].last().unwrap();
-            let next_first = groups[next_gi][0];
-            // Clone MOVE paths between the two groups, elevated to shifted Z.
-            for i in (cur_last + 1)..next_first {
-                if is_move_feature(paths[i].feature) {
-                    let mut cloned = paths[i].clone();
-                    cloned.z_offset = z_shift;
-                    shifted_sequence.push(cloned);
+                // Insert travel if the previous shifted wall ends at a different position
+                if let Some(prev) = shifted_sequence.last() {
+                    if !is_move_feature(prev.feature) {
+                        let prev_end = prev.path.as_ref().and_then(|p| p.path.last());
+                        let cur_start = paths[idx].path.as_ref().and_then(|p| p.path.first());
+                        if let (Some(pe), Some(cs)) = (prev_end, cur_start) {
+                            if pe.x != cs.x || pe.y != cs.y {
+                                shifted_sequence.push(make_travel(pe, cs, &paths[idx].mesh_name));
+                            }
+                        }
+                    }
                 }
+                shifted_sequence.push(paths[idx].clone());
             }
         }
     }
@@ -251,6 +279,17 @@ pub fn modify_paths(
         .filter(|(idx, _)| !shifted_indices[*idx])
         .map(|(_, p)| p)
         .collect();
+
+    // Synthesize retracted travel between normal-Z and shifted-Z sub-sequences.
+    if let (Some(last_normal), Some(first_shifted)) = (result.last(), shifted_sequence.first()) {
+        let le = last_normal.path.as_ref().and_then(|p| p.path.last());
+        let fs = first_shifted.path.as_ref().and_then(|p| p.path.first());
+        if let (Some(le), Some(fs)) = (le, fs) {
+            let dest_mesh = &first_shifted.mesh_name;
+            result.push(make_travel(le, fs, dest_mesh));
+        }
+    }
+
     result.extend(shifted_sequence);
     result
 }

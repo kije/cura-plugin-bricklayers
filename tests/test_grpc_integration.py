@@ -417,12 +417,13 @@ class TestGCodePathsModifyRPC:
     def test_four_walls_alternating_pattern(self, server, modify_stub):
         # 4 walls: wall[3] innermost (protected)
         # Non-innermost: wall[0](c=0,YES), wall[1](c=1,no), wall[2](c=2,YES)
-        # After reorder: 2 normal-Z then 2 shifted
+        # After reorder: 2 normal-Z, then transition travel(s), then 2 shifted
         paths = [_make_path(INNERWALL) for _ in range(4)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        offsets = [p.z_offset for p in result]
-        assert offsets == [0, 0, 100, 100]
+        walls = [p for p in result if p.feature == INNERWALL]
+        wall_offsets = [p.z_offset for p in walls]
+        assert wall_offsets == [0, 0, 100, 100]
 
     def test_z_offset_equals_half_layer_height(self, server, modify_stub):
         server.settings.layer_height = 300
@@ -495,22 +496,31 @@ class TestGCodePathsModifyRPC:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert len(result) == 6
+        # All original paths present; synthesized travels may be added
+        original_features = sorted(p.feature for p in paths)
+        result_features = sorted(p.feature for p in result if p.feature != MOVERETRACTED or p.z_offset == 0)
+        assert result_features == original_features
         # After reorder: all normal-Z first, then shifted
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert shifted[0].feature == INNERWALL
-        # Non-wall paths must all be at z_offset=0
+        # Non-wall, non-travel paths must all be at z_offset=0
         for p in result:
-            if p.feature not in (INNERWALL, OUTERWALL):
+            if p.feature not in (INNERWALL, OUTERWALL, MOVERETRACTED):
                 assert p.z_offset == 0
 
     # --- path ordering preserved ---
 
-    def test_response_path_count_matches_request(self, server, modify_stub):
+    def test_response_wall_count_matches_request(self, server, modify_stub):
+        """All input wall paths are present; synthesized travels may be added."""
         paths = [_make_path(INNERWALL) for _ in range(6)]
         resp = modify_stub.Call(_call_request(paths))
-        assert len(list(resp.gcode_paths)) == 6
+        result = list(resp.gcode_paths)
+        wall_count = sum(1 for p in result if p.feature == INNERWALL)
+        assert wall_count == 6
+        # Any extra paths must be synthesized retracted travels
+        extra = [p for p in result if p.feature == MOVERETRACTED and p.z_offset > 0]
+        assert len(result) == 6 + len(extra)
 
     def test_response_preserves_all_feature_types(self, server, modify_stub):
         """All input feature types are present in output (order may differ due to reorder)."""
@@ -537,7 +547,7 @@ class TestGCodePathsModifyRPC:
         result = list(resp.gcode_paths)
         # Outer walls untouched, 1 inner wall shifted (last after reorder)
         assert all(p.z_offset == 0 for p in result if p.feature == OUTERWALL)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert shifted[0].feature == INNERWALL
 
@@ -555,7 +565,7 @@ class TestGCodePathsModifyRPC:
         result = list(resp.gcode_paths)
         # Inner walls untouched, 1 outer wall shifted
         assert all(p.z_offset == 0 for p in result if p.feature == INNERWALL)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert shifted[0].feature == OUTERWALL
 
@@ -573,7 +583,7 @@ class TestGCodePathsModifyRPC:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 2
 
     def test_no_wall_types_selected_noop(self, server, modify_stub):
@@ -769,9 +779,9 @@ class TestGCodePathsModifyRPC:
         ]
         resp = mod_stub.Call(_call_request(paths, layer_nr=3))
         result = list(resp.gcode_paths)
-        assert len(result) == 4
         # 1 wall shifted, SKIN unchanged, shifted wall last (reordered)
-        shifted = [p for p in result if p.z_offset > 0]
+        # Synthesized retracted travel may be added between normal and shifted
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert shifted[0].z_offset == 100
         assert all(p.z_offset == 0 for p in result if p.feature == SKIN)
@@ -802,7 +812,7 @@ class TestInnermostWallProtection:
         paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         unshifted = [p for p in result if p.z_offset == 0]
         assert len(shifted) == 1
         assert shifted[0].z_offset == 100  # layer_height=200, shift=100
@@ -815,7 +825,7 @@ class TestInnermostWallProtection:
         paths = [_make_path(INNERWALL) for _ in range(4)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 2
 
     def test_five_walls_outside_in_two_shifted(self, server, modify_stub):
@@ -825,7 +835,7 @@ class TestInnermostWallProtection:
         paths = [_make_path(INNERWALL) for _ in range(5)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 2
 
     def test_single_wall_always_protected(self, server, modify_stub):
@@ -842,7 +852,7 @@ class TestInnermostWallProtection:
         paths = [_make_path(INNERWALL), _make_path(INNERWALL)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert shifted[0].z_offset == 100
 
@@ -856,7 +866,7 @@ class TestInnermostWallProtection:
         paths = [_make_path(INNERWALL) for _ in range(3)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         unshifted = [p for p in result if p.z_offset == 0]
         assert len(shifted) == 1
         assert len(unshifted) == 2
@@ -878,7 +888,7 @@ class TestInnermostWallProtection:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 1
         assert shifted[0].z_offset == 100
         # Infill must NOT be shifted
@@ -898,7 +908,7 @@ class TestInnermostWallProtection:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         # Group 1: 1 wall → protected, no shift
         # Group 2: 3 walls → innermost protected, wall counter 0 (no), 1 (YES)
         assert len(shifted) == 1
@@ -1112,8 +1122,8 @@ class TestZLevelReordering:
         features = [p.feature for p in normal_z]
         assert features == [OUTERWALL, INNERWALL, INNERWALL, INFILL]
 
-    def test_path_count_preserved_after_reordering(self, server, modify_stub):
-        """Total number of paths must not change."""
+    def test_original_paths_preserved_after_reordering(self, server, modify_stub):
+        """All original paths present; only synthesized travels added."""
         paths = [
             _make_path(OUTERWALL),
             _make_path(INNERWALL),
@@ -1124,7 +1134,13 @@ class TestZLevelReordering:
         ]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        assert len(result) == 6
+        # All original feature types preserved
+        original_features = sorted(p.feature for p in paths)
+        result_non_travel = sorted(
+            p.feature for p in result
+            if not (p.feature == MOVERETRACTED and p.z_offset > 0 and p.retract)
+        )
+        assert result_non_travel == original_features
 
     def test_shifted_group_preserves_relative_order(self, server, modify_stub):
         """If multiple walls are shifted, their relative order is preserved."""
@@ -1132,7 +1148,7 @@ class TestZLevelReordering:
         paths = [_make_path(INNERWALL) for _ in range(5)]
         resp = modify_stub.Call(_call_request(paths))
         result = list(resp.gcode_paths)
-        shifted = [p for p in result if p.z_offset > 0]
+        shifted = [p for p in result if p.z_offset > 0 and p.feature in (INNERWALL, OUTERWALL)]
         assert len(shifted) == 2
         # Both should have the same z_offset (100)
         assert all(p.z_offset == 100 for p in shifted)
@@ -1615,3 +1631,145 @@ class TestToolpathPermutations:
                     assert p.z_offset == 0, (
                         f"Permutation {idx+1}: OUTERWALL shifted when not targeted"
                     )
+
+
+# ===========================================================================
+# INTER-MODEL TRAVEL SYNTHESIS TESTS (regression: green-line extrusion bug)
+# ===========================================================================
+
+def _make_path_at(
+    feature,
+    *,
+    x_offset: int = 0,
+    y_offset: int = 0,
+    mesh_name: str = "Mesh",
+    layer_thickness: int = 200,
+    flow_ratio: float = 1.0,
+    line_width: int = 400,
+) -> gcode_path_pb2.GCodePath:
+    """Like _make_path but with configurable XY position for spatial tests."""
+    path = gcode_path_pb2.GCodePath(
+        feature=feature,
+        layer_thickness=layer_thickness,
+        flow_ratio=flow_ratio,
+        line_width=line_width,
+        mesh_name=mesh_name,
+    )
+    for i in range(3):
+        path.path.path.append(
+            point3d_pb2.Point3D(
+                x=x_offset + i * 1000,
+                y=y_offset + i * 1000,
+                z=200,
+            )
+        )
+    return path
+
+
+class TestInterModelTravelSynthesis:
+    """Regression tests for the inter-model extrusion bug.
+
+    When Phase 3 reorders paths (normal-Z first, shifted-Z second),
+    transitions between walls from different objects must use synthesized
+    retracted travel moves — never bare extrusion paths.
+    """
+
+    def test_no_extrusion_between_objects_in_shifted_sequence(self, server, modify_stub):
+        """Two objects with distinct coordinates: shifted walls from different
+        objects must be separated by a MOVERETRACTED travel, not consecutive
+        extrusion paths."""
+        paths = [
+            _make_path_at(OUTERWALL, x_offset=0, y_offset=0, mesh_name="A"),
+            _make_path_at(INNERWALL, x_offset=0, y_offset=0, mesh_name="A"),
+            _make_path_at(INNERWALL, x_offset=0, y_offset=0, mesh_name="A"),  # innermost
+            _make_path_at(MOVERETRACTED, x_offset=50000, y_offset=50000, mesh_name="B"),
+            _make_path_at(OUTERWALL, x_offset=50000, y_offset=50000, mesh_name="B"),
+            _make_path_at(INNERWALL, x_offset=50000, y_offset=50000, mesh_name="B"),
+            _make_path_at(INNERWALL, x_offset=50000, y_offset=50000, mesh_name="B"),  # innermost
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # Verify no consecutive extrusion paths from different objects
+        for i in range(len(result) - 1):
+            cur = result[i]
+            nxt = result[i + 1]
+            if (cur.feature in (INNERWALL, OUTERWALL) and
+                    nxt.feature in (INNERWALL, OUTERWALL)):
+                assert cur.mesh_name == nxt.mesh_name or cur.mesh_name == "" or nxt.mesh_name == "", (
+                    f"Consecutive extrusion paths from different objects "
+                    f"at indices {i},{i+1}: mesh={cur.mesh_name!r} → {nxt.mesh_name!r}; "
+                    f"missing travel move between objects"
+                )
+
+    def test_transition_travel_between_normal_and_shifted(self, server, modify_stub):
+        """A retracted travel must exist between the last normal-Z path and
+        the first shifted-Z path to prevent extrusion across the plate."""
+        paths = [
+            _make_path_at(OUTERWALL, x_offset=0, mesh_name="A"),
+            _make_path_at(INNERWALL, x_offset=0, mesh_name="A"),
+            _make_path_at(INNERWALL, x_offset=0, mesh_name="A"),  # innermost
+            _make_path_at(INFILL, x_offset=0, mesh_name="A"),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        shifted_walls = [p for p in result if p.z_offset > 0 and p.feature == INNERWALL]
+        assert len(shifted_walls) == 1
+
+        # Find the transition point: last z_offset=0 path before first shifted wall
+        first_shifted_idx = next(
+            i for i, p in enumerate(result)
+            if p.z_offset > 0 and p.feature == INNERWALL
+        )
+        assert first_shifted_idx > 0, "Shifted wall cannot be first in result"
+        prev = result[first_shifted_idx - 1]
+        assert prev.feature == MOVERETRACTED and prev.z_offset > 0 and prev.retract, (
+            f"Expected retracted travel before first shifted wall, got "
+            f"feature={prev.feature} z_offset={prev.z_offset} retract={prev.retract}"
+        )
+
+    def test_synthesized_travel_connects_correct_positions(self, server, modify_stub):
+        """Synthesized travel's endpoints must match the actual wall positions,
+        not cloned positions from the original path order."""
+        # Object A at (0,0), Object B at (100000,100000) — far apart
+        paths = [
+            _make_path_at(INNERWALL, x_offset=0, y_offset=0, mesh_name="A"),
+            _make_path_at(INNERWALL, x_offset=0, y_offset=0, mesh_name="A"),  # innermost
+            _make_path_at(MOVERETRACTED, x_offset=100000, y_offset=100000, mesh_name="B"),
+            _make_path_at(INNERWALL, x_offset=100000, y_offset=100000, mesh_name="B"),
+            _make_path_at(INNERWALL, x_offset=100000, y_offset=100000, mesh_name="B"),  # innermost
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+
+        # Find synthesized travels (MOVERETRACTED with z_offset > 0)
+        travels = [
+            (i, p) for i, p in enumerate(result)
+            if p.feature == MOVERETRACTED and p.z_offset > 0 and p.retract
+        ]
+        assert len(travels) >= 1, "No synthesized travel found"
+
+        # Each synthesized travel must start near the previous path's end
+        # and end near the next path's start
+        for ti, (idx, travel) in enumerate(travels):
+            if idx == 0 or idx == len(result) - 1:
+                continue
+            prev_path = result[idx - 1]
+            next_path = result[idx + 1]
+            if not prev_path.path or not prev_path.path.path:
+                continue
+            if not next_path.path or not next_path.path.path:
+                continue
+            prev_end = prev_path.path.path[-1]
+            next_start = next_path.path.path[0]
+            travel_start = travel.path.path[0]
+            travel_end = travel.path.path[-1]
+            assert travel_start.x == prev_end.x and travel_start.y == prev_end.y, (
+                f"Travel {ti} start ({travel_start.x},{travel_start.y}) != "
+                f"prev end ({prev_end.x},{prev_end.y})"
+            )
+            assert travel_end.x == next_start.x and travel_end.y == next_start.y, (
+                f"Travel {ti} end ({travel_end.x},{travel_end.y}) != "
+                f"next start ({next_start.x},{next_start.y})"
+            )

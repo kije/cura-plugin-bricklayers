@@ -200,7 +200,9 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
 
         // Quick check: if disabled, skip WASM call entirely
         {
-            let s = self.settings.lock().unwrap();
+            let s = self.settings.lock().map_err(|e| {
+                Status::internal(format!("settings lock poisoned: {}", e))
+            })?;
             debug!(
                 "  settings: layer_height={}µm enabled={}",
                 s.layer_height, s.enabled
@@ -218,19 +220,32 @@ impl proto::gcode_paths::g_code_paths_modify_service_server::GCodePathsModifySer
         // Serialize request to protobuf bytes
         let input_bytes = req.encode_to_vec();
 
-        // Call WASM module
-        let output_bytes = {
-            let mut wasm = self.wasm.lock().unwrap();
-            match wasm.process_layer(&input_bytes) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    warn!("  -> WASM error: {}, returning paths unchanged", e);
-                    let mut r = Response::new(proto::gcode_paths::CallResponse {
-                        gcode_paths: req.gcode_paths,
-                    });
-                    *r.metadata_mut() = slot_metadata();
-                    return Ok(r);
-                }
+        // Call WASM module on a blocking thread — wasmtime-wasi's sync
+        // implementation uses block_on internally, which panics if called
+        // from within a tokio async runtime.
+        let wasm = self.wasm.clone();
+        let output_bytes = match tokio::task::spawn_blocking(move || {
+            let mut wasm = wasm.lock().map_err(|e| format!("wasm lock poisoned: {}", e))?;
+            wasm.process_layer(&input_bytes).map_err(|e| e.to_string())
+        })
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                warn!("  -> WASM error: {}, returning paths unchanged", e);
+                let mut r = Response::new(proto::gcode_paths::CallResponse {
+                    gcode_paths: req.gcode_paths,
+                });
+                *r.metadata_mut() = slot_metadata();
+                return Ok(r);
+            }
+            Err(e) => {
+                warn!("  -> WASM task failed: {}, returning paths unchanged", e);
+                let mut r = Response::new(proto::gcode_paths::CallResponse {
+                    gcode_paths: req.gcode_paths,
+                });
+                *r.metadata_mut() = slot_metadata();
+                return Ok(r);
             }
         };
 
@@ -366,7 +381,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     settings,
                     wasm,
                 },
-            ),
+            )
+            .max_decoding_message_size(100 * 1024 * 1024)
+            .max_encoding_message_size(100 * 1024 * 1024),
         )
         .serve_with_incoming(incoming)
         .await?;
