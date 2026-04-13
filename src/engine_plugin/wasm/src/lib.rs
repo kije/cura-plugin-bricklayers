@@ -15,6 +15,7 @@ pub mod proto {
 /// PrintFeature enum values matching the protobuf definition.
 const OUTERWALL: i32 = 1;
 const INNERWALL: i32 = 2;
+const SKIN: i32 = 3;
 
 // Move-type features (travel/retraction between wall loops).
 const MOVEUNRETRACTED: i32 = 8;
@@ -39,6 +40,7 @@ pub struct BrickSettings {
     pub extrusion_multiplier: f64,
     pub layer_height: i64, // microns
     pub inside_out: bool,
+    pub skip_skin_walls: bool,
 }
 
 /// Request matching the gRPC CallRequest, but as a simple protobuf message.
@@ -125,7 +127,7 @@ pub fn modify_paths(
         (target_inner && f == INNERWALL) || (target_outer && f == OUTERWALL)
     };
 
-    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut groups: Vec<(Vec<usize>, bool)> = Vec::new();
     let mut current_group: Vec<usize> = Vec::new();
     let mut current_group_mesh = String::new();
     for (i, p) in paths.iter().enumerate() {
@@ -133,12 +135,12 @@ pub fn modify_paths(
             if p.mesh_name.is_empty() {
                 // Outside-mesh wall — flush and skip (passthrough)
                 if !current_group.is_empty() {
-                    groups.push(std::mem::take(&mut current_group));
+                    groups.push((std::mem::take(&mut current_group), false));
                     current_group_mesh = String::new();
                 }
             } else if !current_group.is_empty() && p.mesh_name != current_group_mesh {
                 // Wall from a different mesh → break group, start new one
-                groups.push(std::mem::take(&mut current_group));
+                groups.push((std::mem::take(&mut current_group), false));
                 current_group.push(i);
                 current_group_mesh = p.mesh_name.clone();
             } else {
@@ -152,11 +154,11 @@ pub fn modify_paths(
             if !current_group.is_empty() {
                 if p.mesh_name.is_empty() {
                     // Outside-mesh travel inside active group → break
-                    groups.push(std::mem::take(&mut current_group));
+                    groups.push((std::mem::take(&mut current_group), false));
                     current_group_mesh = String::new();
                 } else if p.mesh_name != current_group_mesh {
                     // Inter-object travel (destination mesh ≠ group's mesh) → break
-                    groups.push(std::mem::take(&mut current_group));
+                    groups.push((std::mem::take(&mut current_group), false));
                     current_group_mesh = String::new();
                 }
                 // else: same-mesh move, tolerate
@@ -164,19 +166,23 @@ pub fn modify_paths(
         } else {
             // Any other feature (INFILL, SKIN, SUPPORT, …) → break
             if !current_group.is_empty() {
-                groups.push(std::mem::take(&mut current_group));
+                let terminated_by_skin = p.feature == SKIN;
+                groups.push((std::mem::take(&mut current_group), terminated_by_skin));
                 current_group_mesh = String::new();
             }
         }
     }
     if !current_group.is_empty() {
-        groups.push(current_group);
+        groups.push((current_group, false)); // end-of-layer → not skin
     }
 
     // Phase 2: Apply shifts per group, protecting the innermost wall.
     let mut shifted_indices: Vec<bool> = vec![false; paths.len()];
 
-    for group in &groups {
+    for (group, terminated_by_skin) in &groups {
+        if settings.skip_skin_walls && *terminated_by_skin {
+            continue; // skip walls enclosing skin surfaces
+        }
         if group.len() < 2 {
             continue; // single wall in contour → always protected
         }
@@ -216,7 +222,7 @@ pub fn modify_paths(
 
     // Indices of groups that have at least one shifted wall.
     let groups_with_shifts: Vec<usize> = groups.iter().enumerate()
-        .filter(|(_, g)| g.iter().any(|&idx| shifted_indices[idx]))
+        .filter(|(_, (g, _))| g.iter().any(|&idx| shifted_indices[idx]))
         .map(|(i, _)| i)
         .collect();
 
@@ -224,7 +230,7 @@ pub fn modify_paths(
     // consecutive shifted groups to preserve inter-object travel.
     let mut shifted_sequence: Vec<proto::GCodePath> = Vec::new();
     for (part_idx, &gi) in groups_with_shifts.iter().enumerate() {
-        let group = &groups[gi];
+        let (group, _) = &groups[gi];
         for &idx in group {
             if shifted_indices[idx] {
                 shifted_sequence.push(paths[idx].clone());
@@ -232,8 +238,8 @@ pub fn modify_paths(
         }
         if part_idx + 1 < groups_with_shifts.len() {
             let next_gi = groups_with_shifts[part_idx + 1];
-            let cur_last  = *groups[gi].last().unwrap();
-            let next_first = groups[next_gi][0];
+            let cur_last  = *groups[gi].0.last().unwrap();
+            let next_first = groups[next_gi].0[0];
             // Clone MOVE paths between the two groups, elevated to shifted Z.
             for i in (cur_last + 1)..next_first {
                 if is_move_feature(paths[i].feature) {
@@ -268,6 +274,7 @@ static mut SETTINGS: BrickSettings = BrickSettings {
     extrusion_multiplier: 1.05,
     layer_height: 0,
     inside_out: false,
+    skip_skin_walls: true,
 };
 
 /// Allocate memory in the WASM module for the host to write into.
@@ -298,6 +305,7 @@ pub extern "C" fn set_settings(
     extrusion_multiplier_x1000: i64,
     layer_height: i64,
     inside_out: u32,
+    skip_skin_walls: u32,
 ) {
     unsafe {
         SETTINGS.enabled = enabled != 0;
@@ -308,6 +316,7 @@ pub extern "C" fn set_settings(
         SETTINGS.extrusion_multiplier = extrusion_multiplier_x1000 as f64 / 1000.0;
         SETTINGS.layer_height = layer_height;
         SETTINGS.inside_out = inside_out != 0;
+        SETTINGS.skip_skin_walls = skip_skin_walls != 0;
     }
 }
 

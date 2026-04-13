@@ -54,6 +54,7 @@ class BrickSettings:
     extrusion_multiplier: float = 1.05
     layer_height: int = 0  # microns, from settings broadcast
     inset_direction: str = "outside_in"  # wall print ordering
+    skip_skin_walls: bool = True
 
 
 class HandshakeServicer(handshake_pb2_grpc.HandshakeServiceServicer):
@@ -134,6 +135,8 @@ class BroadcastServicer(broadcast_pb2_grpc.BroadcastServiceServicer):
                     pass
             elif name == "inset_direction":
                 self._settings.inset_direction = val.lower().strip()
+            elif name == "brick_layers_skip_skin_walls":
+                self._settings.skip_skin_walls = val.lower() in ("true", "1", "yes")
 
 
 class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
@@ -236,7 +239,7 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
             printfeatures_pb2.STATIONARYRETRACTUNRETRACT,
         }
 
-        groups = []          # each group is a list of indices into `paths`
+        groups = []          # each element: (indices_list, terminated_by_skin)
         current_group = []
         current_group_mesh = ""
         for i, p in enumerate(paths):
@@ -244,12 +247,12 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
                 if not p.mesh_name:
                     # Outside-mesh wall — flush and skip (passthrough)
                     if current_group:
-                        groups.append(current_group)
+                        groups.append((current_group, False))
                         current_group = []
                         current_group_mesh = ""
                 elif current_group and p.mesh_name != current_group_mesh:
                     # Wall from a different mesh → break group, start new one
-                    groups.append(current_group)
+                    groups.append((current_group, False))
                     current_group = [i]
                     current_group_mesh = p.mesh_name
                 else:
@@ -261,29 +264,32 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
                 if current_group:
                     if not p.mesh_name:
                         # Outside-mesh travel inside active group → break
-                        groups.append(current_group)
+                        groups.append((current_group, False))
                         current_group = []
                         current_group_mesh = ""
                     elif p.mesh_name != current_group_mesh:
                         # Inter-object travel → break
-                        groups.append(current_group)
+                        groups.append((current_group, False))
                         current_group = []
                         current_group_mesh = ""
                     # else: same-mesh move, tolerate
             else:
                 # Any other feature → break
                 if current_group:
-                    groups.append(current_group)
+                    is_skin = (p.feature == printfeatures_pb2.SKIN)
+                    groups.append((current_group, is_skin))
                     current_group = []
                     current_group_mesh = ""
         if current_group:
-            groups.append(current_group)
+            groups.append((current_group, False))  # end-of-layer → not skin
 
         # Phase 2: Apply shifts per group, protecting innermost wall
         inside_out = settings.inset_direction == "inside_out"
         shifted_indices = set()
 
-        for group in groups:
+        for group, terminated_by_skin in groups:
+            if settings.skip_skin_walls and terminated_by_skin:
+                continue  # skip walls enclosing skin surfaces
             if len(group) < 2:
                 continue  # single wall in contour → always protected
 
@@ -311,20 +317,20 @@ class GCodePathsModifyServicer(modify_pb2_grpc.GCodePathsModifyServiceServicer):
         # original, elevated by z_shift, so the nozzle stays up during inter-object
         # travel and doesn't extrude across the build plate.
         groups_with_shifts = [
-            gi for gi, g in enumerate(groups)
+            gi for gi, (g, _) in enumerate(groups)
             if any(i in shifted_indices for i in g)
         ]
 
         shifted_sequence = []
         for part_idx, gi in enumerate(groups_with_shifts):
-            group = groups[gi]
+            group, _ = groups[gi]
             for idx in group:
                 if idx in shifted_indices:
                     shifted_sequence.append(paths[idx])
             if part_idx + 1 < len(groups_with_shifts):
                 next_gi = groups_with_shifts[part_idx + 1]
                 cur_last = group[-1]
-                next_first = groups[next_gi][0]
+                next_first = groups[next_gi][0][0]  # [0]=indices list, [0]=first idx
                 # Clone MOVE paths between the two groups, elevated to shifted Z.
                 for i in range(cur_last + 1, next_first):
                     if paths[i].feature in move_features:

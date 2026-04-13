@@ -180,6 +180,7 @@ def grpc_server():
         apply_outer_walls=False,
         extrusion_multiplier=1.05,
         layer_height=200,
+        skip_skin_walls=True,
     )
     bundle = _ServerBundle(address, settings)
     bundle.start()
@@ -209,6 +210,7 @@ def server(grpc_server):
     s.extrusion_multiplier = 1.05
     s.layer_height = 200
     s.inset_direction = "outside_in"
+    s.skip_skin_walls = True
     return grpc_server
 
 
@@ -353,6 +355,12 @@ class TestBroadcastRPC:
             _settings_request({"brick_layers_apply_outer_walls": "true"})
         )
         assert server.settings.apply_outer_walls is True
+
+    def test_skip_skin_walls_flag(self, server, broadcast_stub):
+        broadcast_stub.BroadcastSettings(
+            _settings_request({"brick_layers_skip_skin_walls": "false"})
+        )
+        assert server.settings.skip_skin_walls is False
 
     def test_extruder_settings_are_parsed(self, server, broadcast_stub):
         broadcast_stub.BroadcastSettings(
@@ -756,22 +764,22 @@ class TestGCodePathsModifyRPC:
         assert server.settings.enabled is True
         assert server.settings.layer_height == 200
 
-        # Step 3: Modify paths for layer 3 (3 inner walls + skin)
+        # Step 3: Modify paths for layer 3 (3 inner walls + infill)
         mod_stub = modify_pb2_grpc.GCodePathsModifyServiceStub(channel)
         paths = [
             _make_path(INNERWALL),
             _make_path(INNERWALL),
             _make_path(INNERWALL),
-            _make_path(SKIN),
+            _make_path(INFILL),
         ]
         resp = mod_stub.Call(_call_request(paths, layer_nr=3))
         result = list(resp.gcode_paths)
         assert len(result) == 4
-        # 1 wall shifted, SKIN unchanged, shifted wall last (reordered)
+        # 1 wall shifted, INFILL unchanged, shifted wall last (reordered)
         shifted = [p for p in result if p.z_offset > 0]
         assert len(shifted) == 1
         assert shifted[0].z_offset == 100
-        assert all(p.z_offset == 0 for p in result if p.feature == SKIN)
+        assert all(p.z_offset == 0 for p in result if p.feature == INFILL)
 
 
 # ===========================================================================
@@ -954,7 +962,7 @@ class TestTravelGapTolerance:
 
     def test_realistic_cura_layer_outer_travel_inner_inner(self, server, modify_stub):
         """Realistic CuraEngine path sequence: OUTERWALL, travel, INNERWALL,
-        travel, INNERWALL, SKIN, INFILL.  Inner walls should still be grouped
+        travel, INNERWALL, INFILL.  Inner walls should still be grouped
         and one shifted."""
         paths = [
             _make_path(OUTERWALL),
@@ -962,7 +970,6 @@ class TestTravelGapTolerance:
             _make_path(INNERWALL),
             _make_path(MOVEUNRETRACTED),
             _make_path(INNERWALL),
-            _make_path(SKIN),
             _make_path(INFILL),
         ]
         resp = modify_stub.Call(_call_request(paths))
@@ -971,7 +978,7 @@ class TestTravelGapTolerance:
         assert any(o != 0 for o in inner_offsets), "inner wall must be shifted"
         # Non-wall paths must be untouched
         for p in result:
-            if p.feature in (SKIN, INFILL, MOVEUNRETRACTED):
+            if p.feature in (INFILL, MOVEUNRETRACTED):
                 assert p.z_offset == 0
 
     def test_skin_breaks_group(self, server, modify_stub):
@@ -1612,3 +1619,105 @@ class TestToolpathPermutations:
                     assert p.z_offset == 0, (
                         f"Permutation {idx+1}: OUTERWALL shifted when not targeted"
                     )
+
+
+# ===========================================================================
+# Skip Skin Walls
+# ===========================================================================
+
+class TestSkipSkinWalls:
+    """Verify that wall groups terminated by SKIN paths are skipped when
+    skip_skin_walls is enabled."""
+
+    def test_walls_before_skin_skipped(self, server, modify_stub):
+        """Wall group terminated by SKIN → no shifting."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        for p in resp.gcode_paths:
+            assert p.z_offset == 0
+
+    def test_walls_before_infill_still_shifted(self, server, modify_stub):
+        """Wall group terminated by INFILL → normal shifting."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INFILL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        shifted = [p for p in resp.gcode_paths if p.z_offset > 0]
+        assert len(shifted) == 1
+
+    def test_skip_skin_walls_disabled(self, server, modify_stub):
+        """With skip_skin_walls=False, wall group before SKIN is shifted normally."""
+        server.settings.skip_skin_walls = False
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        shifted = [p for p in resp.gcode_paths if p.z_offset > 0]
+        assert len(shifted) == 1
+
+    def test_mixed_skin_and_infill_groups(self, server, modify_stub):
+        """First group (→SKIN) skipped, second group (→INFILL) shifted."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INFILL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        result = list(resp.gcode_paths)
+        # Skin-group walls should all be unshifted
+        skin_group_walls = [p for p in result if p.feature == INNERWALL and p.z_offset == 0]
+        shifted_walls = [p for p in result if p.feature == INNERWALL and p.z_offset > 0]
+        # 3 walls in skin group (all unshifted) + 2 protected in infill group = 5 unshifted
+        # 1 wall shifted in infill group
+        assert len(shifted_walls) == 1
+        assert len(skin_group_walls) == 5
+
+    def test_walls_at_end_of_layer_not_skipped(self, server, modify_stub):
+        """Wall group at end of layer (no terminator) → normal shifting."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        shifted = [p for p in resp.gcode_paths if p.z_offset > 0]
+        assert len(shifted) == 1
+
+    def test_outer_walls_before_skin_skipped(self, server, modify_stub):
+        """Outer walls in a skin-terminated group are also skipped."""
+        server.settings.apply_outer_walls = True
+        paths = [
+            _make_path(OUTERWALL),
+            _make_path(INNERWALL),
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        for p in resp.gcode_paths:
+            assert p.z_offset == 0
+
+    def test_single_wall_before_skin_still_protected(self, server, modify_stub):
+        """Single wall before SKIN → protected (too few walls) regardless of skip."""
+        paths = [
+            _make_path(INNERWALL),
+            _make_path(SKIN),
+        ]
+        resp = modify_stub.Call(_call_request(paths))
+        for p in resp.gcode_paths:
+            assert p.z_offset == 0

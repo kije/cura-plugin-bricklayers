@@ -93,7 +93,7 @@ impl WasmRuntime {
 
     /// Push settings into the WASM module.
     pub fn set_settings(&mut self, s: &BrickSettings) {
-        let func = match self.instance.get_typed_func::<(u32, i64, i64, u32, u32, i64, i64, u32), ()>(
+        let func = match self.instance.get_typed_func::<(u32, i64, i64, u32, u32, i64, i64, u32, u32), ()>(
             &mut self.store,
             "set_settings",
         ) {
@@ -117,6 +117,7 @@ impl WasmRuntime {
                 multiplier_x1000,
                 s.layer_height,
                 s.inside_out as u32,
+                s.skip_skin_walls as u32,
             ),
         ) {
             tracing::warn!("WASM: set_settings call failed: {}", e);

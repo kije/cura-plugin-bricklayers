@@ -72,6 +72,17 @@
                     "settable_per_mesh": false,
                     "settable_per_extruder": false,
                     "settable_per_meshgroup": false
+                },
+                "brick_layers_skip_skin_walls":
+                {
+                    "label": "Brick Layers Skip Skin Walls",
+                    "description": "Do not apply brick-layer shifting to walls enclosing top/bottom skin surfaces. Skin walls are detected by their adjacency to skin fill paths. Recommended to leave enabled for better surface quality.",
+                    "type": "bool",
+                    "default_value": true,
+                    "enabled": "brick_layers_enabled",
+                    "settable_per_mesh": false,
+                    "settable_per_extruder": false,
+                    "settable_per_meshgroup": false
                 }
             }
         }
