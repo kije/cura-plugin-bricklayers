@@ -19,6 +19,7 @@ Desktop.ini
 .claude/
 .cursor/
 .copilot/
+.serena/
 
 # === Python ===
 __pycache__/
