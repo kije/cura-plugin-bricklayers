@@ -20,7 +20,7 @@ Work from `src/engine_plugin/` (Rust workspace):
 ```bash
 python -m pytest tests/test_grpc_integration.py tests/test_gcode_lint.py -v
 ```
-108 tests: 75 gRPC integration + 33 G-code lint. Run from project root.
+Run from project root.
 
 ## Key Files
 - `src/BrickLayers.py` — Cura Extension (settings injection)

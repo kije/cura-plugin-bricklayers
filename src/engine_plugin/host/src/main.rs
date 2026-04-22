@@ -56,6 +56,7 @@ struct BrickSettings {
     extrusion_multiplier: f64,
     layer_height: i64,
     inside_out: bool,
+    skip_skin_walls: bool,
 }
 
 type SharedSettings = Arc<Mutex<BrickSettings>>;
@@ -95,6 +96,9 @@ fn parse_settings(s: &mut BrickSettings, settings_map: &std::collections::HashMa
             }
             "inset_direction" => {
                 s.inside_out = val == "inside_out";
+            }
+            "brick_layers_skip_skin_walls" => {
+                s.skip_skin_walls = matches!(val.as_str(), "true" | "1" | "True" | "yes");
             }
             _ => {}
         }
@@ -157,9 +161,10 @@ impl proto::broadcast::broadcast_service_server::BroadcastService for BroadcastS
 
         info!(
             "BrickSettings: enabled={} start={} end={} inner={} outer={} \
-             multiplier={:.2} layer_height={}",
+             multiplier={:.2} layer_height={} skip_skin={}",
             s.enabled, s.start_layer, s.end_layer, s.apply_inner_walls,
             s.apply_outer_walls, s.extrusion_multiplier, s.layer_height,
+            s.skip_skin_walls,
         );
 
         // Push settings to WASM module
