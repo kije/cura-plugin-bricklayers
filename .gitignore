@@ -67,3 +67,7 @@ result-*
 # === Logs ===
 *.log
 npm-debug.log*
+
+# === Plugin runtime debug / IDE tool state ===
+.serena/
+src/BrickLayers_debug.jsonl

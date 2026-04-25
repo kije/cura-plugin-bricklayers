@@ -210,12 +210,41 @@ class BrickLayersEnginePlugin(BackendPlugin):
         )
 
     def usePlugin(self) -> bool:
-        """Only activate when brick_layers_enabled is true and an executable exists."""
+        """Only activate when brick_layers_enabled is true and an executable exists.
+
+        ``brick_layers_enabled`` is ``settable_per_extruder: true`` so the
+        authoritative value lives on the extruder stacks, not the global
+        stack. Cura's global-stack resolver returns the definition default
+        (``false``) when a per-extruder setting isn't set on the global
+        container, which previously caused the plugin to silently refuse
+        to start whenever the user toggled bricks on via the per-extruder
+        UI. Check every active extruder stack; any extruder with bricks
+        enabled is enough reason to launch the plugin (CuraEngine will
+        call modify per-extruder anyway and the plugin will passthrough
+        the extruders that have it off).
+        """
         if self._plugin_command is None:
             return False
 
-        stack = CuraApplication.getInstance().getGlobalContainerStack()
-        if stack is None:
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if global_stack is None:
             return False
 
-        return bool(stack.getProperty("brick_layers_enabled", "value"))
+        # Global-stack check — still the first and cheapest resolution path.
+        if bool(global_stack.getProperty("brick_layers_enabled", "value")):
+            return True
+
+        # Per-extruder resolution: settable_per_extruder settings resolve on
+        # extruder stacks. Iterate active extruders and return True if any
+        # has bricks enabled.
+        try:
+            from cura.Settings.ExtruderManager import ExtruderManager
+            ext_manager = ExtruderManager.getInstance()
+            for ext_stack in ext_manager.getActiveExtruderStacks():
+                if bool(ext_stack.getProperty("brick_layers_enabled", "value")):
+                    return True
+        except Exception as e:
+            Logger.log("w", "BrickLayers: extruder enablement check failed: %s", e)
+
+        return False

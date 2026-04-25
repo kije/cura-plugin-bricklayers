@@ -93,7 +93,7 @@ impl WasmRuntime {
 
     /// Push settings into the WASM module.
     pub fn set_settings(&mut self, s: &BrickSettings) {
-        let func = match self.instance.get_typed_func::<(u32, i64, i64, u32, u32, i64, i64, u32), ()>(
+        let func = match self.instance.get_typed_func::<(u32, i64, i64, u32, u32, i64, i64, u32, i64), ()>(
             &mut self.store,
             "set_settings",
         ) {
@@ -111,15 +111,79 @@ impl WasmRuntime {
             (
                 s.enabled as u32,
                 s.start_layer,
-                s.end_layer,
+                // Field is named `end_layer_raw` but at this point the host
+                // has already substituted the resolved 1-indexed end value,
+                // so the WASM side sees a concrete positive number (or -1
+                // for "no cap"). See GCodePathsModifyServiceImpl::call.
+                s.end_layer_raw,
                 s.apply_inner_walls as u32,
                 s.apply_outer_walls as u32,
                 multiplier_x1000,
                 s.layer_height,
                 s.inside_out as u32,
+                s.contour_break_distance,
             ),
         ) {
             tracing::warn!("WASM: set_settings call failed: {}", e);
+        }
+    }
+
+    /// Push the list of meshes whose per-mesh `brick_layers_enabled=false`.
+    /// The WASM side stores these and excludes matching walls from brick
+    /// processing (passthrough). Must be called BEFORE ``process_layer`` on
+    /// every call — the list is replaced, not appended to.
+    pub fn set_disabled_meshes(&mut self, mesh_names: &[String]) {
+        // clear_disabled_meshes() — fallible look-up, silently ignore if the
+        // WASM module doesn't export this symbol (older WASM version).
+        let clear = match self
+            .instance
+            .get_typed_func::<(), ()>(&mut self.store, "clear_disabled_meshes")
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let _ = clear.call(&mut self.store, ());
+
+        if mesh_names.is_empty() {
+            return;
+        }
+
+        let add = match self
+            .instance
+            .get_typed_func::<(u32, u32), ()>(&mut self.store, "add_disabled_mesh")
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let alloc = match self
+            .instance
+            .get_typed_func::<u32, u32>(&mut self.store, "alloc")
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let dealloc = self
+            .instance
+            .get_typed_func::<(u32, u32), ()>(&mut self.store, "dealloc")
+            .ok();
+
+        for name in mesh_names {
+            let bytes = name.as_bytes();
+            let ptr = match alloc.call(&mut self.store, bytes.len() as u32) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if self
+                .memory
+                .write(&mut self.store, ptr as usize, bytes)
+                .is_err()
+            {
+                continue;
+            }
+            let _ = add.call(&mut self.store, (ptr, bytes.len() as u32));
+            if let Some(d) = &dealloc {
+                let _ = d.call(&mut self.store, (ptr, bytes.len() as u32));
+            }
         }
     }
 

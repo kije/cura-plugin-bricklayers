@@ -7,9 +7,9 @@
             "description": "Shift alternating inner wall perimeter loops up by half a layer height, creating interlocking brick-like walls. This dramatically improves vertical part strength by preventing aligned layer seams. Requires at least 2 inner wall lines. The innermost wall (adjacent to infill) is always kept at nominal height. Recommended: disable 'Alternate Extra Wall', increase 'Z Hop Height' by half the layer height, and set combing to 'Not in Skin' or 'Off'.",
             "type": "bool",
             "default_value": false,
-            "settable_per_mesh": false,
-            "settable_per_extruder": false,
-            "settable_per_meshgroup": false,
+            "settable_per_mesh": true,
+            "settable_per_extruder": true,
+            "settable_per_meshgroup": true,
             "children":
             {
                 "brick_layers_extrusion_multiplier":
@@ -23,9 +23,9 @@
                     "minimum_value_warning": "0.8",
                     "maximum_value_warning": "1.5",
                     "enabled": "brick_layers_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
+                    "settable_per_mesh": true,
+                    "settable_per_extruder": true,
+                    "settable_per_meshgroup": true
                 },
                 "brick_layers_start_layer":
                 {
@@ -35,21 +35,20 @@
                     "default_value": 3,
                     "minimum_value": "1",
                     "enabled": "brick_layers_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
+                    "settable_per_mesh": true,
+                    "settable_per_extruder": true,
+                    "settable_per_meshgroup": true
                 },
                 "brick_layers_end_layer":
                 {
                     "label": "Brick Layers End Layer",
-                    "description": "Last layer to apply brick pattern. Use -1 (or 0) to apply to all layers.",
+                    "description": "Last layer to apply brick pattern. Use -1 (or 0) to apply to all layers. Python-style negative indexing is supported: -3 means 'apply until 3 layers from the top' (top 3 layers printed normally), -5 leaves the top 5 layers plain, etc. The plugin derives the effective last layer from (machine_height / layer_height), so this counts from the printer's maximum build height rather than each model's individual top layer.",
                     "type": "int",
                     "default_value": -1,
-                    "minimum_value": "-1",
                     "enabled": "brick_layers_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
+                    "settable_per_mesh": true,
+                    "settable_per_extruder": true,
+                    "settable_per_meshgroup": true
                 },
                 "brick_layers_apply_inner_walls":
                 {
@@ -58,9 +57,9 @@
                     "type": "bool",
                     "default_value": true,
                     "enabled": "brick_layers_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
+                    "settable_per_mesh": true,
+                    "settable_per_extruder": true,
+                    "settable_per_meshgroup": true
                 },
                 "brick_layers_apply_outer_walls":
                 {
@@ -69,9 +68,25 @@
                     "type": "bool",
                     "default_value": false,
                     "enabled": "brick_layers_enabled",
-                    "settable_per_mesh": false,
-                    "settable_per_extruder": false,
-                    "settable_per_meshgroup": false
+                    "settable_per_mesh": true,
+                    "settable_per_extruder": true,
+                    "settable_per_meshgroup": true
+                },
+                "brick_layers_contour_break_distance":
+                {
+                    "label": "Brick Layers Contour Break Distance",
+                    "description": "Maximum XY distance between consecutive wall segments that the plugin still considers to be part of the same contour. When the nozzle would need to move further than this between two inner-wall paths, they are treated as belonging to different spatial contours, the brick pattern counter is reset for each contour, and each contour's local innermost wall is protected. Lower values split groups more aggressively (safer for complex wall-only geometries); higher values keep more walls in one group (fewer Z-hops, more likely to miss protection on complex shapes). An automatic safety cap of 3× line width is always applied, so a mis-configured high value cannot silently merge neighbouring contours.",
+                    "type": "float",
+                    "default_value": 2.0,
+                    "minimum_value": "0.1",
+                    "maximum_value": "50.0",
+                    "minimum_value_warning": "0.5",
+                    "maximum_value_warning": "5.0",
+                    "unit": "mm",
+                    "enabled": "brick_layers_enabled",
+                    "settable_per_mesh": true,
+                    "settable_per_extruder": true,
+                    "settable_per_meshgroup": true
                 }
             }
         }
