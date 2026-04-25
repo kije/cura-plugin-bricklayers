@@ -22,3 +22,8 @@ tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[profile.release]
+strip = true  # Automatically strip symbols from the binary.
+opt-level = "z"  # Optimize for size.
+lto = true

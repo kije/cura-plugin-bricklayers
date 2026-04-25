@@ -20,7 +20,7 @@ Work from `src/engine_plugin/` (Rust workspace):
 ```bash
 python -m pytest tests/test_grpc_integration.py tests/test_gcode_lint.py -v
 ```
-108 tests: 75 gRPC integration + 33 G-code lint. Run from project root.
+Run from project root.
 
 ## Key Files
 - `src/BrickLayers.py` — Cura Extension (settings injection)
@@ -45,7 +45,7 @@ python -m pytest tests/test_grpc_integration.py tests/test_gcode_lint.py -v
 - SDK env vars: set `DEVELOPER_DIR`/`SDKROOT` in `shellHook` only (not as `mkShell` env attrs — cc wrapper overrides those)
 - `~/.cargo/config.toml`: global `target-cpu=native` + `target-feature=+neon` for aarch64
 - Cura 5.12 Docker: QML errors in `BrickLayersSaveAreaButton.qml:20,29` — known, cosmetic
-- Engine plugin not invoked during Docker slicing (gRPC handshake not initiated) — known issue
+
 - WASM warmup: `--warmup` flag pre-compiles `.cwasm` cache at plugin load; addresses macOS Gatekeeper delay
 - Port readiness: `start()` polls TCP port after `super().start()` to prevent "Connection refused" races
 

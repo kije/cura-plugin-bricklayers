@@ -112,11 +112,40 @@ class BrickLayersEnginePlugin(BackendPlugin):
         # Fall back to Python prototype
         prototype_path = os.path.join(plugin_dir, "engine_prototype.py")
         if os.path.isfile(prototype_path):
-            Logger.log("d", "BrickLayers: Using Python prototype engine plugin: %s", prototype_path)
-            return [sys.executable, prototype_path]
+            python = self._find_python()
+            Logger.log("d", "BrickLayers: Using Python prototype engine plugin: %s (python: %s)", prototype_path, python)
+            return [python, prototype_path]
 
         Logger.log("w", "BrickLayers: No engine plugin executable found")
         return None
+
+    @staticmethod
+    def _find_python() -> str:
+        """Return the best available Python 3 executable for the current environment.
+
+        Priority order:
+        1. /lsiopy/bin/python3  — linuxserver.io Docker images (VNC test container)
+        2. sys.executable       — the interpreter Cura itself is running under
+        3. shutil.which("python3") / shutil.which("python") — PATH fallback
+        """
+        import shutil
+
+        candidates = [
+            "/lsiopy/bin/python3",  # linuxserver.io venv (Docker / VNC container)
+            sys.executable,         # Cura's own interpreter (macOS app bundle, pip install, etc.)
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+
+        # Last resort: search PATH
+        for name in ("python3", "python"):
+            found = shutil.which(name)
+            if found:
+                return found
+
+        # Should never happen — sys.executable is always set
+        return sys.executable
 
     def _warmup_engine(self) -> None:
         """Pre-compile the WASM module in the background at plugin load time.
@@ -133,7 +162,8 @@ class BrickLayersEnginePlugin(BackendPlugin):
         if self._plugin_command is None:
             return
         # Only applies to the compiled binary; the Python prototype has no WASM cache.
-        if len(self._plugin_command) >= 2 and self._plugin_command[0] == sys.executable:
+        # Prototype commands are [python, script] (length >= 2); binary commands are [path] (length 1).
+        if len(self._plugin_command) >= 2:
             return
         binary = self._plugin_command[0]
         try:
@@ -180,12 +210,41 @@ class BrickLayersEnginePlugin(BackendPlugin):
         )
 
     def usePlugin(self) -> bool:
-        """Only activate when brick_layers_enabled is true and an executable exists."""
+        """Only activate when brick_layers_enabled is true and an executable exists.
+
+        ``brick_layers_enabled`` is ``settable_per_extruder: true`` so the
+        authoritative value lives on the extruder stacks, not the global
+        stack. Cura's global-stack resolver returns the definition default
+        (``false``) when a per-extruder setting isn't set on the global
+        container, which previously caused the plugin to silently refuse
+        to start whenever the user toggled bricks on via the per-extruder
+        UI. Check every active extruder stack; any extruder with bricks
+        enabled is enough reason to launch the plugin (CuraEngine will
+        call modify per-extruder anyway and the plugin will passthrough
+        the extruders that have it off).
+        """
         if self._plugin_command is None:
             return False
 
-        stack = CuraApplication.getInstance().getGlobalContainerStack()
-        if stack is None:
+        app = CuraApplication.getInstance()
+        global_stack = app.getGlobalContainerStack()
+        if global_stack is None:
             return False
 
-        return bool(stack.getProperty("brick_layers_enabled", "value"))
+        # Global-stack check — still the first and cheapest resolution path.
+        if bool(global_stack.getProperty("brick_layers_enabled", "value")):
+            return True
+
+        # Per-extruder resolution: settable_per_extruder settings resolve on
+        # extruder stacks. Iterate active extruders and return True if any
+        # has bricks enabled.
+        try:
+            from cura.Settings.ExtruderManager import ExtruderManager
+            ext_manager = ExtruderManager.getInstance()
+            for ext_stack in ext_manager.getActiveExtruderStacks():
+                if bool(ext_stack.getProperty("brick_layers_enabled", "value")):
+                    return True
+        except Exception as e:
+            Logger.log("w", "BrickLayers: extruder enablement check failed: %s", e)
+
+        return False
